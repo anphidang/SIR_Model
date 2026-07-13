@@ -284,7 +284,7 @@ RELEVENT_NODES = {
     "CoffeeSetupMug":    {'PandaMobile', 'PandaGripper', 'Counter', 'CoffeeMachine', 'obj'},
 }
 
-def is_node_relevant_for_task(node_name, task_name, lang_goal):
+def is_node_relevant_for_task(node_name, task_name,     lang_goal):
     is_relevant = False
     if node_name in RELEVENT_NODES[task_name]:
         is_relevant = True
@@ -301,3 +301,5 @@ def get_num_relevant_nodes_per_task(task_name):
         return len(RELEVENT_NODES[task_name]) + 1
     else:
         return len(RELEVENT_NODES[task_name])
+    
+    

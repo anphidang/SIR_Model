@@ -36,15 +36,25 @@ def soft_histrogram_except_middle_loss(scores, num_bins=10, sigma=0.05, offset=0
 
 def debatch_graphs_masks(x, edge_index, batch):
 
-    if "batch" not in list(batch.keys()):
-        batch.batch = torch.zeros(x.shape[0], device=x.device, dtype=int)
-        batch.num_graphs = 1
+    if batch is None:
+        # Single graph, no batch vector provided
+        batch_index = torch.zeros(x.shape[0], device=x.device, dtype=torch.int64)
+        num_graphs = 1
+    elif torch.is_tensor(batch):
+        # batch is already a batch-index vector (e.g. from PyG Data.batch)
+        batch_index = batch
+        num_graphs = batch_index.max().item() + 1
+    else:
+        # batch is a PyG Data object or dict-like object
+        if "batch" not in list(batch.keys()):
+            batch.batch = torch.zeros(x.shape[0], device=x.device, dtype=int)
+            batch.num_graphs = 1
 
-    if "num_graphs" not in batch.keys():
-        batch.num_graphs = batch.batch.max().item() + 1
+        if "num_graphs" not in batch.keys():
+            batch.num_graphs = batch.batch.max().item() + 1
 
-    batch_index = batch.batch
-    num_graphs = batch.num_graphs
+        batch_index = batch.batch
+        num_graphs = batch.num_graphs
 
     if edge_index is not None:
         edge_mask = torch.zeros(edge_index.shape[1], device=x.device, dtype=torch.int32)

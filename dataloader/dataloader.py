@@ -51,7 +51,8 @@ def dataset_split_robocasa(
                                                 use_graph_fusion,
                                                 use_splitted_modalities,
                                                 cropped_img_dim,
-                                                cropped_model_name))
+                                                cropped_model_name,
+                                                task_name=task_name))
         val_dataset_list.append(RoboCasaDataset(data,
                                         sorted_keys[train_split:],
                                         offset,
@@ -64,7 +65,8 @@ def dataset_split_robocasa(
                                         use_graph_fusion,
                                         use_splitted_modalities,
                                         cropped_img_dim,
-                                        cropped_model_name))
+                                        cropped_model_name,
+                                        task_name=task_name))
     
     # ConcatDataset creates a single dataset from the list of datasets
     train_dataset = ConcatDataset(train_dataset_list)

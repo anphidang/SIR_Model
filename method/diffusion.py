@@ -58,6 +58,15 @@ class Diffusion(Base_Method):
             lang_goal_tokenized = clip.tokenize(lang_goal).to(self.device)
             lang_goal = self.language_encoder.encode_text(lang_goal_tokenized).to(torch.float32)
         goal['lang'] = lang_goal.to(self.device)
+        #change by me
+        if 'obs_graph' in batch['observation'] and 'task_name' in batch:
+            for key in batch['observation']['obs_graph']:
+                batch['observation']['obs_graph'][key].task_name = batch['task_name']
+
+        # Attach language embedding to each graph observation so the GNN can use it.
+        if 'obs_graph' in batch['observation']:
+            for key in batch['observation']['obs_graph']:
+                batch['observation']['obs_graph'][key].lang_goal = goal['lang']
         
         for key in batch['observation']:
             for k in batch["observation"][key]:
@@ -71,7 +80,13 @@ class Diffusion(Base_Method):
             elif key == "obs_img":
                 state[key] = self.vision_encoder(batch["observation"][key])
             elif key == "obs_graph":
-                state[key] = self.graph_encoder(batch["observation"][key])
+                assert self.obs_window_size == 1, \
+                    "Graph-Encoder bekommt b*w Graphen, aber nur b Sprach-Embeddings."
+                state[key] = self.graph_encoder(
+                    batch["observation"][key],
+                    lang_emb=goal['lang'],                      # [B, 512], oben schon encodiert
+                    task_names=batch['goal'].get('task_name'),  # Liste[str], Laenge B
+                )
             else:
                 raise NotImplementedError(f"Modality {key} not implemented in diffusion method.")
         
@@ -87,11 +102,25 @@ class Diffusion(Base_Method):
     
     def compute_training_loss(self, state, action, goal):
         loss_dict = {}
-        
-        loss_dict['diffusion_loss'] = self.diffusion_loss(perceptual_emb=state, latent_goal=goal, actions=action)
-        
-        loss_dict['total_loss'] = loss_dict['diffusion_loss']
-        
+
+        loss_dict['diffusion_loss'] = self.diffusion_loss(
+            perceptual_emb=state, latent_goal=goal, actions=action
+        )
+        total_loss = loss_dict['diffusion_loss']
+
+        # Regularizer aus dem Sparsification-Layer einsammeln (nur XAI-GNN).
+        # Sie werden in dessen forward() gefuellt, das in preprocess_batch
+        # bereits gelaufen ist.
+        graph_encoder = getattr(self, 'graph_encoder', None)
+        if graph_encoder is not None and hasattr(graph_encoder, 'sparsification_layers'):
+            for mod, layer in graph_encoder.sparsification_layers.items():
+                for name, entry in layer.coarsening_loss.items():
+                    if entry['weight'] == 0:
+                        continue
+                    loss_dict[f"{mod}_{name}"] = entry['value'].detach()
+                    total_loss = total_loss + entry['weight'] * entry['value']
+
+        loss_dict['total_loss'] = total_loss
         return loss_dict
     
     def compute_validation_loss(self, state, action, goal):

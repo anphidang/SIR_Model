@@ -4,6 +4,8 @@ import torch
 from torch_geometric.nn import GATv2Conv, global_mean_pool, global_add_pool, global_max_pool
 from torch_geometric.nn.norm import LayerNorm
 import torch.nn.functional as F
+import hydra
+from torch_geometric.data import Data   #added by me 
 
 from networks.graph_encoder.utils import debatch_graphs_masks, soft_histogram_loss, soft_histrogram_except_middle_loss
 from networks.transformer.transformer_decoders import TransformerFiLMDecoder
@@ -11,16 +13,16 @@ from utils.generate_graph_dataset_robocasa import get_num_relevant_nodes_per_tas
 
 class Multi_GNN(nn.Module):
     def __init__(self,
-                 input_dim,
-                 hidden_dim,
-                 output_dim,
-                 edge_dim,
-                 num_layer,
-                 layer_name,
-                 pool_name,
-                 heads,
-                 dropout,
-                 modalities,
+                input_dim,
+                hidden_dim,
+                output_dim,
+                edge_dim,
+                num_layer,
+                layer_name,
+                pool_name,
+                heads,
+                dropout,
+                modalities,
                 ) -> None:
         super(Multi_GNN, self).__init__()
         
@@ -28,10 +30,86 @@ class Multi_GNN(nn.Module):
         for mod in modalities:
             self.models[mod] = GNN(input_dim[mod], hidden_dim, output_dim, edge_dim, num_layer, layer_name, pool_name, heads, dropout)
 
-    def forward(self, input):
+    def forward(self, input, lang_emb=None, task_names=None):
         for key in input:
             input[key] = self.models[key](input[key])
         return input
+
+class Multi_XAI_GNN(nn.Module):
+    def __init__(self,
+                input_dim,
+                hidden_dim,
+                output_dim,
+                edge_dim,
+                num_layer,
+                layer_name,
+                pool_name,
+                heads,
+                dropout,
+                modalities,
+                sparsification_layer,
+                ) -> None:
+        super(Multi_XAI_GNN, self).__init__()
+        
+        self.sparsification_layers = nn.ModuleDict()
+        self.models = nn.ModuleDict()
+        for mod in modalities:
+            self.sparsification_layers[mod] = hydra.utils.instantiate(
+                sparsification_layer, in_dim=input_dim[mod]
+            )
+            self.models[mod] = GNN(
+                input_dim[mod], hidden_dim, output_dim, edge_dim, num_layer,
+                layer_name, pool_name, heads, dropout
+            )
+
+    def forward(self, input, lang_emb=None, task_names=None):
+        for key in input:
+            graph = input[key]
+
+            edge_weights, sampled_nodes, probs = self.sparsification_layers[key](
+                graph.x,
+                graph.edge_index,
+                graph.edge_attr,
+                graph.edge_attr,
+                lang_emb,
+                graph,
+                task_names,
+            )
+
+            sparse_graph = self._build_sparse_graph(
+                graph, sampled_nodes, probs, edge_weights,
+                differentiable=self.sparsification_layers[key].differentiable_dropping,
+            )
+            input[key] = self.models[key](sparse_graph)
+        return input
+    
+    def _build_sparse_graph(self, graph, sampled_nodes, probs, edge_weights, differentiable=False):
+        x = graph.x[sampled_nodes]
+        if differentiable:
+            # FIX: Gradientenpfad von den Scores in die Node-Features.
+            # Ohne das lernt der Sparsification-Layer nur ueber edge_attr.
+            x = x * probs[sampled_nodes].unsqueeze(-1)
+
+        edge_index = graph.edge_index
+        num_nodes = graph.x.shape[0]
+        device = graph.x.device
+
+        node_mask = torch.zeros(num_nodes, dtype=torch.bool, device=device)
+        node_mask[sampled_nodes] = True
+        kept_edges = node_mask[edge_index[0]] & node_mask[edge_index[1]]
+
+        old_to_new = torch.full((num_nodes,), -1, dtype=torch.long, device=device)
+        old_to_new[sampled_nodes] = torch.arange(sampled_nodes.shape[0], device=device)
+        sparse_edge_index = old_to_new[edge_index[:, kept_edges]]
+
+        edge_attr = edge_weights[kept_edges] if edge_weights is not None else graph.edge_attr[kept_edges]
+
+        out = Data(x=x, edge_index=sparse_edge_index, edge_attr=edge_attr)
+        # graph.batch existiert hier garantiert: debatch_graphs_masks legt es
+        # im Single-Graph-Fall selbst an.
+        out.batch = graph.batch[sampled_nodes]
+        
+        return out
     
 class GNN(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim, edge_dim, num_layer, layer_name, pool_name, heads, dropout) -> None:
@@ -130,27 +208,28 @@ class GNN(nn.Module):
     
 class Sparsification_Module(nn.Module):
     def __init__(self, 
-                 coars_type,
-                 in_dim,
-                 hidden_dim,
-                 num_heads,
-                 num_layers,
-                 dropout_prob=0.2,
-                 sampling_strategy="topk_PerTask", 
-                 differentiable_dropping_nodes=False,
-                 scoring_strategy="sigmoid", 
-                 sample_abs: int=None,
-                 gamma=-0.1,
-                 zeta=1.1,
-                 beta=0.66, 
-                 l0_reg_weight=1.0,
-                 variance_weight=0.0,
-                 sum_mask_weight=0.0,
-                 target_sum_node_probs=0.0,
-                 uniform_dist_weight=0.0,
-                 uniform_except_middle_weight=0.0,
-                 uniform_except_middle_offset=0.0,
-                 threshold_sum_weight=0.0):
+                coars_type,
+                in_dim,
+                hidden_dim,
+                num_heads,
+                num_layers,
+                dropout_prob=0.2,
+                sampling_strategy="topk_PerTask", 
+                differentiable_dropping_nodes=False,
+                scoring_strategy="sigmoid", 
+                sample_abs: int=None,
+                gamma=-0.1,
+                zeta=1.1,
+                beta=0.66, 
+                l0_reg_weight=1.0,
+                variance_weight=0.0,
+                sum_mask_weight=0.0,
+                target_sum_node_probs=0.0,
+                uniform_dist_weight=0.0,
+                uniform_except_middle_weight=0.0,
+                uniform_except_middle_offset=0.0,
+                threshold_sum_weight=0.0,
+                entropy_reg_weight=0.0):
         super().__init__()
 
         self.scoring_strategy = scoring_strategy
@@ -185,6 +264,7 @@ class Sparsification_Module(nn.Module):
         self.uniform_except_middle_weight = uniform_except_middle_weight
         self.uniform_except_middle_offset = uniform_except_middle_offset
         self.threshold_sum_weight = threshold_sum_weight
+        self.entropy_reg_weight = entropy_reg_weight
 
     def l0_train(self, logAlpha, min, max):
         U = torch.rand(logAlpha.size()).type_as(logAlpha) + self.eps
@@ -319,8 +399,7 @@ class TransformerCoarsening(nn.Module):
                 attn_pdrop=dropout_prob,
                 resid_pdrop=dropout_prob,
                 n_layers=num_layers,
-                block_size = 128,
-                film_cond_dim = embed_dim)        
+                film_cond_dim=embed_dim)
         else:
             raise ValueError(f"Unknown coarsening type: {coars_type}")
 
@@ -331,7 +410,7 @@ class TransformerCoarsening(nn.Module):
         self.coars_type = coars_type
 
     def forward(self, x, edge_index=None, edge_attr=None, node_mask=None, lang_emb=None, num_graphs=None):
-       
+    
         x = self.embedding(x)  # [N, D]
 
         for i in range(num_graphs):

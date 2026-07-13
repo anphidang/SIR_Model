@@ -90,7 +90,8 @@ class RoboCasaKitchenTester():
                 
                 while step_counter < env.horizon:
                     batch = {'observation': obs,
-                             'goal': {'lang': lang_goal}
+                             'goal': {'lang': lang_goal, 'task_name': task_name},
+                             'task_name': task_name,
                              }
 
                     state, _, goal = method.preprocess_batch(batch)

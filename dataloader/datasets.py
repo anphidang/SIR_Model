@@ -1,4 +1,5 @@
 import json
+import os
 import clip
 import torch
 from torch.utils.data import Dataset
@@ -24,9 +25,11 @@ class RoboCasaDataset(Dataset):
                  use_graph_fusion: bool,
                  use_splitted_modalities: bool,
                  cropped_img_dim: int,
-                 model_name: str = None
+                 model_name: str = None,
+                 task_name: str = None,
     ):
         self.data_directory = data_directory
+        self.task_name = task_name
         
         self.use_prop = True if len(prop_mod) > 0 else False
         self.use_img = True if len(img_mod) > 0 else False
@@ -249,6 +252,8 @@ class RoboCasaDataset(Dataset):
                         last = raw_graph[-1]
                         raw_graph.extend([last] * (self.obs_window - len(raw_graph)))
                     item['observation']['obs_graph'][m] = raw_graph[0]
+            for graph in item['observation']['obs_graph'].values():
+                graph.task_name = self.task_name
 
         # --- ACTIONS ---
         # Get indices for Action Window
@@ -260,6 +265,7 @@ class RoboCasaDataset(Dataset):
         # --- GOALS ---
         # Language goal is static per demonstration
         item['goal']['lang'] = self.lang_goals[demo_idx]
+        item['goal']['task_name'] = self.task_name
         
         return item
             

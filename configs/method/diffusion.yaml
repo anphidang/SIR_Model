@@ -4,7 +4,7 @@ _recursive_: false
 defaults:
   - action_generator: mdt
   - vision_encoder: cnn
-  - graph_encoder: gnn
+  - graph_encoder: xai_gnn
 
 optimization:
   _target_: torch.optim.AdamW
@@ -16,7 +16,7 @@ lr_scheduler:
   _target_: method.utils.WarmupSequentialLRScheduler
   epochs: ${trainer.epochs}
   warmup_ratio: 0.05
-  step_ratio: 0.1
+  step_ratio: 0.1 
   gamma: 0.5
   start_factor: 0.1
 
@@ -33,3 +33,4 @@ sigma_data: 0.5
 sigma_min: 0.001 # noise value when denoising last step
 sigma_max: 80 # noise value when denoising first step
 sigma_sample_density_type: 'loglogistic'
+
