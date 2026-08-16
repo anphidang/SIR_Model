@@ -9,7 +9,7 @@ from torch_geometric.data import Data   #added by me
 
 from networks.graph_encoder.utils import debatch_graphs_masks, soft_histogram_loss, soft_histrogram_except_middle_loss
 from networks.transformer.transformer_decoders import TransformerFiLMDecoder
-from utils.generate_graph_dataset_robocasa import get_num_relevant_nodes_per_task
+from utils.generate_graph_dataset_robocasa import get_num_relevant_nodes_per_task, RELEVENT_NODES
 
 class Multi_GNN(nn.Module):
     def __init__(self,
@@ -35,63 +35,63 @@ class Multi_GNN(nn.Module):
             input[key] = self.models[key](input[key])
         return input
 
-class Multi_XAI_GNN(nn.Module):
-    def __init__(self,
-                input_dim,
-                hidden_dim,
-                output_dim,
-                edge_dim,
-                num_layer,
-                layer_name,
-                pool_name,
-                heads,
-                dropout,
-                modalities,
-                sparsification_layer,
-                ) -> None:
-        super(Multi_XAI_GNN, self).__init__()
-        
-        self.sparsification_layers = nn.ModuleDict()
-        self.models = nn.ModuleDict()
-        for mod in modalities:
-            self.sparsification_layers[mod] = hydra.utils.instantiate(
-                sparsification_layer, in_dim=input_dim[mod]
-            )
-            self.models[mod] = GNN(
-                input_dim[mod], hidden_dim, output_dim, edge_dim, num_layer,
-                layer_name, pool_name, heads, dropout
-            )
 
-    def forward(self, input, lang_emb=None, task_names=None):
-        for key in input:
-            graph = input[key]
+class Multi_XAI_GNN(nn.Module):     
+    def __init__(self,                 
+                 input_dim,                 
+                 hidden_dim,                 
+                 output_dim,                 
+                 edge_dim,                 
+                 num_layer,                 
+                 layer_name,                 
+                 pool_name,                 
+                 heads,                 
+                 dropout,                 
+                 modalities,                 
+                 sparsification_layer,                 
+                 ) -> None:         
+        super(Multi_XAI_GNN, self).__init__()                  
+        self.sparsification_layers = nn.ModuleDict()         
+        self.models = nn.ModuleDict()         
+        for mod in modalities:             
+            self.sparsification_layers[mod] = hydra.utils.instantiate(                 
+                sparsification_layer, in_dim=input_dim[mod]             
+            )             
+            self.models[mod] = GNN(                 
+                input_dim[mod], hidden_dim, output_dim, edge_dim, num_layer,                 
+                layer_name, pool_name, heads, dropout             
+            )      
 
-            edge_weights, sampled_nodes, probs = self.sparsification_layers[key](
-                graph.x,
-                graph.edge_index,
-                graph.edge_attr,
-                graph.edge_attr,
-                lang_emb,
-                graph,
-                task_names,
-            )
+    def forward(self, input, lang_emb=None, task_names=None):         
+        for key in input:             
+            graph = input[key]              
+            edge_weights, sampled_nodes, probs = self.sparsification_layers[key](                 
+                graph.x,                 
+                graph.edge_index,                 
+                graph.edge_attr,                 
+                graph.edge_attr,                 
+                lang_emb,                 
+                graph,                 
+                task_names,             
+            )              
+            
+            self._dbg_probs = probs.detach()
+            self._log_selection_accuracy(graph, sampled_nodes, task_names)
 
-            sparse_graph = self._build_sparse_graph(
-                graph, sampled_nodes, probs, edge_weights,
-                differentiable=self.sparsification_layers[key].differentiable_dropping,
-            )
-            input[key] = self.models[key](sparse_graph)
-        return input
-    
-    def _build_sparse_graph(self, graph, sampled_nodes, probs, edge_weights, differentiable=False):
-        x = graph.x[sampled_nodes]
-        if differentiable:
-            # FIX: Gradientenpfad von den Scores in die Node-Features.
-            # Ohne das lernt der Sparsification-Layer nur ueber edge_attr.
+            sparse_graph = self._build_sparse_graph(                 
+                graph, sampled_nodes, probs, edge_weights,                 
+                differentiable=self.sparsification_layers[key].differentiable_dropping,             
+            )             
+            input[key] = self.models[key](sparse_graph)         
+        return input          
+
+    def _build_sparse_graph(self, graph, sampled_nodes, probs, edge_weights, differentiable=False):         
+        x = graph.x[sampled_nodes]         
+        if differentiable:             
             x = x * probs[sampled_nodes].unsqueeze(-1)
 
         edge_index = graph.edge_index
-        num_nodes = graph.x.shape[0]
+        num_nodes = int(graph.x.shape[0])
         device = graph.x.device
 
         node_mask = torch.zeros(num_nodes, dtype=torch.bool, device=device)
@@ -105,11 +105,50 @@ class Multi_XAI_GNN(nn.Module):
         edge_attr = edge_weights[kept_edges] if edge_weights is not None else graph.edge_attr[kept_edges]
 
         out = Data(x=x, edge_index=sparse_edge_index, edge_attr=edge_attr)
-        # graph.batch existiert hier garantiert: debatch_graphs_masks legt es
-        # im Single-Graph-Fall selbst an.
         out.batch = graph.batch[sampled_nodes]
+        out.node_scores = probs[sampled_nodes]  
+        return out            
         
-        return out
+
+    def _log_selection_accuracy(self, graph, sampled_nodes, task_names):
+        self.selection_accuracy = None
+        names = getattr(graph, 'node_names', None)
+        if names is None or not task_names:
+            return
+
+        if names and isinstance(names[0], list):
+            flat = [n for sub in names for n in sub]
+        else:
+            flat = list(names)
+        if len(flat) != graph.x.shape[0]:
+            return
+
+        batch_idx = graph.batch
+        hits = total = 0
+        for pos in sampled_nodes.tolist():
+            task = task_names[int(batch_idx[pos])]
+            if flat[pos] in RELEVENT_NODES[task]:
+                hits += 1
+            total += 1
+
+        if total:
+            self.selection_accuracy = torch.tensor(hits / total, device=graph.x.device)
+
+        if not hasattr(self, "_dbg_done"):
+            self._dbg_done = True
+            g0 = (batch_idx == 0)
+            probs0 = self._dbg_probs[g0] if hasattr(self, "_dbg_probs") else None
+            names0 = [flat[i] for i in g0.nonzero().flatten().tolist()]
+            sel0 = [flat[p] for p in sampled_nodes.tolist() if batch_idx[p] == 0]
+            print("\n--- DEBUG Graph 0 ---")
+            print("alle Knoten :", names0)
+            print("gewaehlt    :", sel0)
+            print("relevant    :", RELEVENT_NODES[task_names[0]])
+            if probs0 is not None:
+                for n, p in zip(names0, probs0.tolist()):
+                    print(f"   {p:.6f}  {n}")
+        
+
     
 class GNN(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim, edge_dim, num_layer, layer_name, pool_name, heads, dropout) -> None:
@@ -200,7 +239,14 @@ class GNN(nn.Module):
                 
         output = x
         # Pooling and projection to create the final embedding
-        pooling = self.pooling(output, batch.batch)
+        node_scores = getattr(batch, 'node_scores', None)
+        if node_scores is not None:
+            w = node_scores.unsqueeze(-1)
+            num = self.pooling(output * w, batch.batch)          #weighted sum
+            den = self.pooling(w, batch.batch).clamp(min=1e-8)   # normalization
+            pooling = num / den
+        else:
+            pooling = self.pooling(output, batch.batch)
         
         embedding = self.output(pooling)
         

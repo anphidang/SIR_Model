@@ -1,6 +1,6 @@
 import torch
 
-GRAPH_MODALITY_LIST = ["one_hot_labels", "bb_coordinates", "cropped_image_feature"]
+GRAPH_MODALITY_LIST = ["one_hot_labels", "bb_coordinates", "cropped_image_feature", "bb3d_coordinates"]
 
 def combine_graph_modalities(graph_data, graph_mod, idx=None, j=None):
     if idx is None and j is None:
@@ -94,7 +94,11 @@ def handle_fusing(left, right, mod, cropped_fusion):
         cropped_index = mod.split(GRAPH_MODALITY_LIST[2]).index('')
         # We use -1 as placeholder for dynamic length
         active_mods.append((cropped_index, 'crop', -1))
-    
+    if GRAPH_MODALITY_LIST[3] in mod:
+        bb3d_index = mod.split(GRAPH_MODALITY_LIST[3]).index('')
+        bb3d_length = 12
+        active_mods.append((bb3d_index, 'bb3d', bb3d_length))
+
     # 2. Sort by rank (position in the tensor)
     active_mods.sort(key=lambda x: x[0])
     
@@ -126,6 +130,10 @@ def handle_fusing(left, right, mod, cropped_fusion):
                 fused_parts.append(l_slice)
             else:
                 fused_parts.append(torch.cat((l_slice, r_slice), dim=-1))
+        elif name == 'bb3d':
+            # World-frame box, already fused across both static cams -> take one copy,
+            # same as OHL (concatenating would just duplicate identical values).
+            fused_parts.append(l_slice)
         else:
             # OHL: ONE value (identical) -> Take Left
             fused_parts.append(l_slice)

@@ -18,6 +18,9 @@ from networks.vision_encoder.cnn import SimpleImageEncoder
 from networks.vision_encoder.utils import crop_and_resize_to_64, crop_and_resize_to_64_for_fusion
 from utils.create_graphs import create_graph_datapoint
 from utils.generate_graph_dataset_robocasa import OBJECT_NAMES_IMAGES, get_bb_pos
+from utils.generate_3d_bb_dataset_robocasa import backproject_mask_to_world, fit_oriented_box
+from utils.generate_3d_bb_graph_dataset_robocasa import BB3D_FEATURE_DIM
+from robosuite.utils.camera_utils import get_camera_extrinsic_matrix, get_camera_intrinsic_matrix, get_real_depth_map
 
 log = logging.getLogger(__name__)
 
@@ -78,9 +81,9 @@ class RoboCasaKitchenTester():
                     img_obs = self.create_image_obs(obs_all, manager)
                     obs['obs_img'] = img_obs
                 if manager.use_graph:
-                    graph_obs = self.create_graph_obs(obs_all, left_graph, right_graph, manager)
+                    graph_obs = self.create_graph_obs(obs_all, left_graph, right_graph, manager, env)
                     obs['obs_graph'] = graph_obs
-                             
+
                 lang_goal = env.get_ep_meta()['lang']
                 print("Goal: ", lang_goal)
                 
@@ -114,7 +117,7 @@ class RoboCasaKitchenTester():
                         img_obs = self.create_image_obs(obs_all, manager)
                         obs['obs_img'] = img_obs
                     if manager.use_graph:
-                        graph_obs = self.create_graph_obs(obs_all, left_graph, right_graph, manager)
+                        graph_obs = self.create_graph_obs(obs_all, left_graph, right_graph, manager, env)
                         obs['obs_graph'] = graph_obs
                     
                     if env._check_success():
@@ -158,12 +161,12 @@ class RoboCasaKitchenTester():
             obs[mod] = img
         return obs
     
-    def create_graph_obs(self, obs_all, left_graph, right_graph, manager):
+    def create_graph_obs(self, obs_all, left_graph, right_graph, manager, env):
         left_data_point = {}
         right_data_point = {}
-        
+
         for mod in manager.graph_modalities:
-            left_object_names, right_object_names, left_objects, right_objects = self.get_data_from_img(obs_all, mod, self.cls_numbers, self.cls_list)
+            left_object_names, right_object_names, left_objects, right_objects = self.get_data_from_img(obs_all, mod, self.cls_numbers, self.cls_list, env)
             left_data_point[mod] = create_graph_datapoint(left_graph[mod], left_object_names, left_objects)
             right_data_point[mod] = create_graph_datapoint(right_graph[mod], right_object_names, right_objects)
 
@@ -190,11 +193,22 @@ class RoboCasaKitchenTester():
                 graph_obs[mod + '_right'] = graph_data_right[mod]
         return graph_obs
                 
-    def get_data_from_img(self, obs, mod, cls_numbers: list, cls_list: list):
-        
+    def get_data_from_img(self, obs, mod, cls_numbers: list, cls_list: list, env=None):
+
         left_object_names, left_boxes, left_morph_masks, left_img = self.helper_function(obs, 'agentview_left', cls_numbers, cls_list)
         right_object_names, right_boxes, right_morph_masks, right_img = self.helper_function(obs, 'agentview_right', cls_numbers, cls_list)
-        
+
+        # World-frame boxes are fused across both static cams up front (see
+        # generate_3d_bb_dataset_robocasa.py, whose offline logic this mirrors),
+        # so both branches below just look names up in the same dict. Computed from
+        # the RAW segmentation mask, independent of helper_function's cv2-opened
+        # masks: opening erases small-but-valid objects entirely (confirmed via a
+        # frame-by-frame comparison against the offline-extracted ground truth) and
+        # measurably distorted box centers even for large objects like PandaMobile.
+        world_boxes = None
+        if mod == "bb3d_coordinates":
+            world_boxes = self._compute_bb3d_world_boxes(obs, env)
+
         if mod == "one_hot_labels":
             objects = []
             for name in left_object_names:
@@ -221,7 +235,16 @@ class RoboCasaKitchenTester():
                 else:
                     object_img.append(crop_and_resize_to_64(left_img, left_morph_masks[i]))
             left_objects = self.cropped_image_feature_encoder(torch.stack(object_img)).squeeze(0)
-            
+        elif mod == "bb3d_coordinates":
+            # Node list comes straight from world_boxes, not from the (cv2-opened,
+            # 2D-pipeline) left_object_names - see the comment above world_boxes.
+            # Objects without a valid fused box (too few depth points, occluded, ...)
+            # are dropped, mirroring the offline extractor's per-frame 'valid' mask
+            # instead of fabricating a placeholder box.
+            left_object_names = sorted(world_boxes.keys())
+            left_objects = torch.stack([world_boxes[name] for name in left_object_names]) \
+                if left_object_names else torch.empty((0, BB3D_FEATURE_DIM))
+
         if mod == "one_hot_labels":
             objects = []
             for name in right_object_names:
@@ -248,8 +271,58 @@ class RoboCasaKitchenTester():
                 else:
                     object_img.append(crop_and_resize_to_64(right_img, right_morph_masks[i]))
             right_objects = self.cropped_image_feature_encoder(torch.stack(object_img)).squeeze(0)
-        
+        elif mod == "bb3d_coordinates":
+            right_object_names = sorted(world_boxes.keys())
+            right_objects = torch.stack([world_boxes[name] for name in right_object_names]) \
+                if right_object_names else torch.empty((0, BB3D_FEATURE_DIM))
+
         return left_object_names, right_object_names, left_objects, right_objects
+
+    def _compute_bb3d_world_boxes(self, obs, env):
+        # Live analog of generate_3d_bb_dataset_robocasa.py's per-frame extraction:
+        # back-project each object's RAW segmentation mask into world-frame points
+        # using this frame's depth + camera matrices, fuse both static views, fit
+        # one oriented box per object. Deliberately does NOT go through
+        # helper_function's masks - those are cv2-opened for the 2D pixel-box
+        # pipeline, which silently erases small-but-otherwise-valid objects and
+        # measurably distorted box centers even for large ones (confirmed against
+        # the offline-extracted ground truth). Runs at the live 128x128 camera
+        # resolution (vs. 256x256 offline), so the point-count gate is scaled down
+        # accordingly - boxes are noisier than the ones the model trained on, but
+        # this is the best available signal without re-rendering at a second,
+        # higher resolution during rollout.
+        min_points_per_object = 5
+
+        id_to_cls = {i + 1: cls for cls, i in self.cls_list.items()}
+
+        world_pts_per_obj = {}
+        for view in ("agentview_left", "agentview_right"):
+            camera_name = "robot0_" + view
+            seg = obs[camera_name + "_segmentation_class"][:, :, 0]
+            depth_norm = obs[camera_name + "_depth"]
+            depth = get_real_depth_map(env.sim, depth_norm)[:, :, 0]
+            height, width = depth_norm.shape[0], depth_norm.shape[1]
+            K = get_camera_intrinsic_matrix(env.sim, camera_name, height, width)
+            cam_to_world = get_camera_extrinsic_matrix(env.sim, camera_name)
+
+            for obj_id in np.unique(seg):
+                if obj_id == 0 or obj_id not in id_to_cls:
+                    continue
+                name = id_to_cls[obj_id]
+                pts = backproject_mask_to_world(seg == obj_id, depth, K, cam_to_world)
+                if pts is None:
+                    continue
+                world_pts_per_obj.setdefault(name, []).append(pts)
+
+        world_boxes = {}
+        for name, chunks in world_pts_per_obj.items():
+            pts = np.concatenate(chunks, axis=0)
+            if pts.shape[0] < min_points_per_object:
+                continue
+            center, extents, rot6d = fit_oriented_box(pts)
+            box = np.concatenate([center, extents, rot6d]).astype(np.float32)
+            world_boxes[name] = torch.from_numpy(box)
+        return world_boxes
     
     def helper_function(self, obs, view, cls_numbers, cls_list):
         img = self.transform(obs['robot0_' + view + '_image'])
@@ -281,7 +354,7 @@ class RoboCasaKitchenTester():
                 new_obj_ids.append(obj_ids[r].item())
 
         if new_obj_ids == []:
-            return [], torch.tensor([])
+            return [], torch.tensor([]), torch.tensor([]), img
         
         morph_masks = torch.tensor(np.array(morph_masks))
 

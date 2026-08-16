@@ -7,6 +7,7 @@ from envs.robocasa.utils import TASK_LIST
 from manager.base_manager import Base_Manager
 from networks.vision_encoder.utils import load_pretrained_image_encoder
 from utils.generate_graph_dataset_robocasa import OBJECT_NAMES_IMAGES, create_graphs_and_save
+from utils.generate_3d_bb_graph_dataset_robocasa import BB3D_FEATURE_DIM, create_3d_bb_graphs_and_save
 
 import logging
 
@@ -122,12 +123,19 @@ class RoboCasa_Manager(Base_Manager):
         else:
             for task, mod in datasets_to_create:
                 log.info(f"Creating dataset for task: {task} and modality: {mod}")
-                create_graphs_and_save(
-                    dataset_path=self.data_path,
-                    task_name=task,
-                    graph_modality=mod,
-                    encoder_model=self.cropped_image_feature_encoder,
-                )
+                if mod == "bb3d_coordinates":
+                    create_3d_bb_graphs_and_save(
+                        dataset_path=self.data_path,
+                        task_name=task,
+                        graph_modality=mod,
+                    )
+                else:
+                    create_graphs_and_save(
+                        dataset_path=self.data_path,
+                        task_name=task,
+                        graph_modality=mod,
+                        encoder_model=self.cropped_image_feature_encoder,
+                    )
     
     def test_method(self, method, store_videos, eval_n_times, working_dir, during_training=False, epoch=None):
         times_repeat = self.times_repeat #if during_training else self.times_repeat
@@ -141,7 +149,7 @@ class RoboCasa_Manager(Base_Manager):
             tester = RoboCasaKitchenTester(
                 dataset_path=self.data_path,
                 task_list=task_names,
-                use_depth=False,
+                use_depth="bb3d_coordinates" in self.graph_modalities,
                 cropped_image_feature_encoder=self.cropped_image_feature_encoder,
             )
             
@@ -225,6 +233,11 @@ class RoboCasa_Manager(Base_Manager):
             if "bb_coordinates" in mod:
                 dim[mod] += 10 * factor
                 # graph_edge_dim = 4
+            if "bb3d_coordinates" in mod:
+                # World-frame boxes are already fused across both static cams (see
+                # generate_3d_bb_graph_dataset_robocasa.py), so - like one_hot_labels -
+                # fusion takes one copy instead of concatenating left+right.
+                dim[mod] += BB3D_FEATURE_DIM
             if "cropped_image_feature" in mod:
                 if "fusion" in self.pretrained_img_encoder_name:
                     dim[mod] += self.cropped_img_dim

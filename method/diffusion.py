@@ -8,6 +8,7 @@ from functools import partial
 
 from method import utils
 from method.base_method import Base_Method
+from utils.generate_graph_dataset_robocasa import RELEVENT_NODES
 
 class Diffusion(Base_Method):
     def __init__(self,
@@ -80,12 +81,13 @@ class Diffusion(Base_Method):
             elif key == "obs_img":
                 state[key] = self.vision_encoder(batch["observation"][key])
             elif key == "obs_graph":
-                assert self.obs_window_size == 1, \
-                    "Graph-Encoder bekommt b*w Graphen, aber nur b Sprach-Embeddings."
+                task_names = batch['goal'].get('task_name')
+                if isinstance(task_names, str):          # Rollout-Pfad: ein String
+                    task_names = [task_names]
                 state[key] = self.graph_encoder(
                     batch["observation"][key],
-                    lang_emb=goal['lang'],                      # [B, 512], oben schon encodiert
-                    task_names=batch['goal'].get('task_name'),  # Liste[str], Laenge B
+                    lang_emb=goal['lang'],
+                    task_names=task_names,
                 )
             else:
                 raise NotImplementedError(f"Modality {key} not implemented in diffusion method.")
@@ -121,6 +123,9 @@ class Diffusion(Base_Method):
                     total_loss = total_loss + entry['weight'] * entry['value']
 
         loss_dict['total_loss'] = total_loss
+        ge = getattr(self, 'graph_encoder', None)
+        if ge is not None and getattr(ge, 'selection_accuracy', None) is not None:
+            loss_dict['selection_accuracy'] = ge.selection_accuracy
         return loss_dict
     
     def compute_validation_loss(self, state, action, goal):

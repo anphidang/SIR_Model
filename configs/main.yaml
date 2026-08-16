@@ -27,3 +27,4 @@ trainer:
   log_dir: "/home/an-phi/rob/SIR_Model/logs/${wandb.project}"
   model_path: 
 
+
