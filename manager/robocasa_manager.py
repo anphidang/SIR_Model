@@ -32,6 +32,7 @@ class RoboCasa_Manager(Base_Manager):
         pretrained_img_encoder_name: str = None,
         use_graph_fusion: bool = False,
         use_splitted_modalities: bool = False,
+        bb3d_frame_mode: str = "full",
     ):
         super().__init__(
             data_path,
@@ -50,7 +51,8 @@ class RoboCasa_Manager(Base_Manager):
         )
         
         self.times_repeat = times_repeat
-        
+        self.bb3d_frame_mode = bb3d_frame_mode
+
         self.use_graph_fusion = use_graph_fusion
         self.use_splitted_modalities = use_splitted_modalities
         self.adapted_graph_modalities = graph_modalities
@@ -151,6 +153,7 @@ class RoboCasa_Manager(Base_Manager):
                 task_list=task_names,
                 use_depth="bb3d_coordinates" in self.graph_modalities,
                 cropped_image_feature_encoder=self.cropped_image_feature_encoder,
+                bb3d_frame_mode=self.bb3d_frame_mode,
             )
             
             results = tester.test(

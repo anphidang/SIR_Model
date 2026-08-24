@@ -1,7 +1,7 @@
 _target_: manager.robocasa_manager.RoboCasa_Manager
 _recursive_: false
 
-data_path: "/home/an-phi/rob/SIR_Model/data/"
+data_path: "/home/an-phi/Dokumente/rob/SIR_Model/data/"
 
 load_dataset: True
 
@@ -14,7 +14,7 @@ act_window: 10
 action_dim: 12
 times_repeat: 5
 
-task_names: ["TurnOffSinkFaucet"] # Either ALL       Drawer: OpenDrawer, CloseDrawer
+task_names: ["CloseSingleDoor"] # Either ALL       Drawer: OpenDrawer, CloseDrawer
                             # or list of       Doors: CloseDoubleDoor, CloseSingleDoor, OpenDoubleDoor, OpenSingleDoor
                             # tasks            Microwave: TurnOffMicrowave, TurnOnMicrowave
                             #                  Sink: TurnOnSinkFaucet, TurnOffSinkFaucet, TurnSinkSpout
@@ -30,9 +30,13 @@ prop_modalities: [] #["robot0_gripper_qpos", "robot0_joint_pos", "robot0_eef_pos
 image_modalities: [] #["inhand", "left", "right"]
 
 # Graph-Based Modality
-graph_modalities: ["bb_coordinates", "cropped_image_feature"] #["one_hot_labels", "bb_coordinates", "bb3d_coordinates", "cropped_image_feature"] #I CHANGED THIS BECAUSE THE DATA ISNT THERE YET
+graph_modalities: ["bb3d_coordinates", "cropped_image_feature"] #["one_hot_labels", "bb_coordinates", "bb3d_coordinates", "cropped_image_feature"]
 # bb3d_coordinates requires bb3d_dataset.hdf5 per task, generated via
 # utils/generate_3d_bb_dataset_robocasa.py --task <task> beforehand.
+# Must match the --frame_mode used to generate that file - "full" (SE(3) into the gripper
+# frame) or "translation_only" (subtract gripper position, keep world-aligned axes; stays
+# consistent with world/base-frame OSC action deltas). See generate_3d_bb_dataset_robocasa.py.
+bb3d_frame_mode: "translation_only"
 pretrained_img_encoder_name: "cropped_image_feature_encoder_fusion_dim_37" # cropped_image_feature_encoder_dim_256, cropped_image_feature_encoder_dim_37
 use_graph_fusion: True
 use_splitted_modalities: False  

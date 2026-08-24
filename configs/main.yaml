@@ -24,7 +24,7 @@ trainer:
   eval_n_times: 20 # number of random scenarios
   store_videos: True
   use_ema: False
-  log_dir: "/home/an-phi/rob/SIR_Model/logs/${wandb.project}"
+  log_dir: "/home/an-phi/Dokumente/rob/SIR_Model/logs/${wandb.project}"
   model_path: 
 
 

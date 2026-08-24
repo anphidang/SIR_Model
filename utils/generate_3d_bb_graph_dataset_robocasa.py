@@ -18,8 +18,13 @@ import torch
 from tqdm import tqdm
 
 from utils.create_graphs import create_graph_datapoint
-
-BB3D_FEATURE_DIM = 12  # center(3) + extents(3) + 6D rotation(6), see generate_3d_bb_dataset_robocasa.py
+from utils.generate_3d_bb_dataset_robocasa import (  # noqa: F401 - BB3D_FEATURE_DIM re-exported; single source of truth so this can't drift from the extractor
+    BB3D_FEATURE_DIM,
+    load_feature_stats,
+    normalize_feature,
+    stats_hash,
+    stats_hash_path,
+)
 
 
 def create_3d_bb_graphs_and_save(
@@ -34,6 +39,13 @@ def create_3d_bb_graphs_and_save(
             f"  python utils/generate_3d_bb_dataset_robocasa.py --task {task_name} "
             f"--output {bb3d_path}"
         )
+    # Frozen once (ideally on the training split) via --stats_only, reused identically here
+    # and at rollout (envs/robocasa/kitchen.py) - raw box/qpos scales differ by orders of
+    # magnitude (see generate_3d_bb_dataset_robocasa.py's module docstring), unnormalized
+    # they'd be near-invisible to the GNN after the first linear layer.
+    stats = load_feature_stats(dataset_path)
+    with open(stats_hash_path(dataset_path, task_name, graph_modality), "w") as fh:
+        fh.write(stats_hash(stats))
 
     f = h5py.File(bb3d_path, "r")
     demo_keys = sorted(f.keys(), key=lambda k: int(k.split("_")[-1]))
@@ -54,7 +66,7 @@ def create_3d_bb_graphs_and_save(
         for t in range(num_frames):
             frame_object_names = [name for name in obj_names if valid[name][t]]
             frame_objects = torch.stack(
-                [torch.from_numpy(boxes[name][t]).float() for name in frame_object_names]
+                [torch.from_numpy(normalize_feature(name, boxes[name][t], stats)) for name in frame_object_names]
             ) if frame_object_names else torch.empty((0, BB3D_FEATURE_DIM))
             demo_data.append(create_graph_datapoint(graph, frame_object_names, frame_objects))
         all_data.append(demo_data)

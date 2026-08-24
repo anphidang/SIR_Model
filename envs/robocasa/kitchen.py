@@ -18,8 +18,19 @@ from networks.vision_encoder.cnn import SimpleImageEncoder
 from networks.vision_encoder.utils import crop_and_resize_to_64, crop_and_resize_to_64_for_fusion
 from utils.create_graphs import create_graph_datapoint
 from utils.generate_graph_dataset_robocasa import OBJECT_NAMES_IMAGES, get_bb_pos
-from utils.generate_3d_bb_dataset_robocasa import backproject_mask_to_world, fit_oriented_box
-from utils.generate_3d_bb_graph_dataset_robocasa import BB3D_FEATURE_DIM
+from utils.generate_3d_bb_dataset_robocasa import (
+    BB3D_FEATURE_DIM,
+    FRAME_MODES,
+    backproject_mask_to_world,
+    build_node_feature,
+    fit_oriented_box,
+    get_world_pose_in_gripper,
+    load_feature_stats,
+    normalize_feature,
+    stats_hash,
+    stats_hash_path,
+    transform_box_to_node_frame,
+)
 from robosuite.utils.camera_utils import get_camera_extrinsic_matrix, get_camera_intrinsic_matrix, get_real_depth_map
 
 log = logging.getLogger(__name__)
@@ -30,8 +41,37 @@ class RoboCasaKitchenTester():
                  task_list: list[str],
                  use_depth: bool,
                  cropped_image_feature_encoder: torch.nn.Module = None,
+                 bb3d_frame_mode: str = "full",
                  ):
-        
+        if bb3d_frame_mode not in FRAME_MODES:
+            raise ValueError(f"Unknown bb3d_frame_mode: {bb3d_frame_mode!r}, expected one of {FRAME_MODES}")
+        self.bb3d_frame_mode = bb3d_frame_mode
+        # Same frozen stats used to normalize the offline graphs (generate_3d_bb_graph_dataset_robocasa.py)
+        # - MUST be the same file, or rollout features are on a different scale than training.
+        # Enforced, not just commented: create_3d_bb_graphs_and_save() writes a hash of the
+        # stats it normalized with next to each task's graphs; verified against a hash of
+        # what we just loaded here, so a stats file that was regenerated after graph-building
+        # (e.g. on a different task split) fails loudly instead of silently skewing rollout.
+        self.bb3d_feature_stats = load_feature_stats(dataset_path) if use_depth else None
+        if self.bb3d_feature_stats is not None:
+            expected_hash = stats_hash(self.bb3d_feature_stats)
+            for task_name in task_list:
+                hash_path = stats_hash_path(dataset_path, task_name, "bb3d_coordinates")
+                if not os.path.isfile(hash_path):
+                    raise FileNotFoundError(
+                        f"{hash_path} is missing - regenerate {task_name}'s graphs with "
+                        f"generate_3d_bb_graph_dataset_robocasa.create_3d_bb_graphs_and_save() "
+                        f"so they're paired with a stats hash."
+                    )
+                with open(hash_path) as fh:
+                    graph_hash = fh.read().strip()
+                if graph_hash != expected_hash:
+                    raise ValueError(
+                        f"bb3d_feature_stats.json ({expected_hash}) doesn't match the stats "
+                        f"{task_name}'s graphs were normalized with ({graph_hash}) - "
+                        f"regenerate that task's graphs against the current stats file."
+                    )
+
         self.env_list, self.task_list = create_kitchen_env(dataset_path, task_list, use_depth, 42)
         
         self.transform = transforms.Compose([
@@ -290,10 +330,17 @@ class RoboCasaKitchenTester():
         # resolution (vs. 256x256 offline), so the point-count gate is scaled down
         # accordingly - boxes are noisier than the ones the model trained on, but
         # this is the best available signal without re-rendering at a second,
-        # higher resolution during rollout.
+        # higher resolution during rollout. Boxes are re-expressed relative to the gripper
+        # exactly like the offline extractor (self.bb3d_frame_mode), so this MUST stay in
+        # sync with generate_3d_bb_dataset_robocasa.py's transform/frame_mode or
+        # train/inference features diverge silently.
         min_points_per_object = 5
 
         id_to_cls = {i + 1: cls for cls, i in self.cls_list.items()}
+        pf = env.robots[0].robot_model.naming_prefix
+        world_pose_in_gripper = get_world_pose_in_gripper(obs, pf)
+        gripper_pos_world = np.asarray(obs[f"{pf}eef_pos"], dtype=np.float32)
+        gripper_qpos = np.asarray(obs[f"{pf}gripper_qpos"], dtype=np.float32)
 
         world_pts_per_obj = {}
         for view in ("agentview_left", "agentview_right"):
@@ -319,8 +366,12 @@ class RoboCasaKitchenTester():
             pts = np.concatenate(chunks, axis=0)
             if pts.shape[0] < min_points_per_object:
                 continue
-            center, extents, rot6d = fit_oriented_box(pts)
-            box = np.concatenate([center, extents, rot6d]).astype(np.float32)
+            center, extents, axes = fit_oriented_box(pts)
+            rel_center, rel_rot6d = transform_box_to_node_frame(
+                center, axes, world_pose_in_gripper, gripper_pos_world, self.bb3d_frame_mode
+            )
+            box = build_node_feature(name, rel_center, extents, rel_rot6d, gripper_qpos)
+            box = normalize_feature(name, box, self.bb3d_feature_stats)
             world_boxes[name] = torch.from_numpy(box)
         return world_boxes
     

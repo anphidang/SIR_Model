@@ -1,16 +1,53 @@
 import torch
 
+from utils.generate_3d_bb_dataset_robocasa import BB3D_FEATURE_DIM
+
 GRAPH_MODALITY_LIST = ["one_hot_labels", "bb_coordinates", "cropped_image_feature", "bb3d_coordinates"]
 
 def combine_graph_modalities(graph_data, graph_mod, idx=None, j=None):
     if idx is None and j is None:
-        base_graph = graph_data[graph_mod[0]].clone()
-        feats = [graph_data[mod].x for mod in graph_mod]
+        graphs = [graph_data[mod] for mod in graph_mod]
     else:
-        base_graph = graph_data[graph_mod[0]][idx][j].clone()
-        feats = [graph_data[mod][idx][j].x for mod in graph_mod]
-    base_graph.x = torch.cat(feats, dim=-1)
-    
+        graphs = [graph_data[mod][idx][j] for mod in graph_mod]
+
+    # Different modalities can see different subsets of objects per frame (e.g. bb3d_coordinates
+    # fuses both static cams while cropped_image_feature only sees objects segmented in a single
+    # view), so - like fuse_graphs() does for left/right of the same modality - align every
+    # modality's nodes onto the union of node names (zero-padding missing ones) before
+    # concatenating features, instead of assuming identical node order/count across modalities.
+    all_names = sorted(set().union(*(g.node_names for g in graphs)))
+    name_to_idx = {name: i for i, name in enumerate(all_names)}
+    num_nodes = len(all_names)
+
+    feat_blocks = []
+    for g in graphs:
+        block = torch.zeros((num_nodes, g.x.shape[1]), device=g.x.device, dtype=g.x.dtype)
+        for src_i, name in enumerate(g.node_names):
+            block[name_to_idx[name]] = g.x[src_i]
+        feat_blocks.append(block)
+
+    fused_x = torch.cat(feat_blocks, dim=-1)
+
+    src, dst = torch.meshgrid(
+        torch.arange(num_nodes, device=fused_x.device),
+        torch.arange(num_nodes, device=fused_x.device),
+        indexing="ij"
+    )
+    src = src.flatten()
+    dst = dst.flatten()
+    mask = src != dst
+    src = src[mask]
+    dst = dst[mask]
+    edge_index = torch.stack((src, dst), dim=0)
+    edge_attr = torch.ones(edge_index.shape[1], device=fused_x.device, dtype=torch.float32)
+
+    base_graph = type(graphs[0])(
+        x=fused_x,
+        edge_index=edge_index,
+        edge_attr=edge_attr,
+        node_names=all_names,
+    )
+
     return base_graph
 
 def fuse_graphs(graph_data_left, graph_data_right, mod, step_idx=None, is_cropped_fusion=False):
@@ -96,8 +133,7 @@ def handle_fusing(left, right, mod, cropped_fusion):
         active_mods.append((cropped_index, 'crop', -1))
     if GRAPH_MODALITY_LIST[3] in mod:
         bb3d_index = mod.split(GRAPH_MODALITY_LIST[3]).index('')
-        bb3d_length = 12
-        active_mods.append((bb3d_index, 'bb3d', bb3d_length))
+        active_mods.append((bb3d_index, 'bb3d', BB3D_FEATURE_DIM))
 
     # 2. Sort by rank (position in the tensor)
     active_mods.sort(key=lambda x: x[0])
