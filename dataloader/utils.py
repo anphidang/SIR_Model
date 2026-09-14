@@ -1,8 +1,9 @@
 import torch
 
 from utils.generate_3d_bb_dataset_robocasa import BB3D_FEATURE_DIM
+from utils.generate_graph_dataset_robocasa import CLIP_LABEL_DIM
 
-GRAPH_MODALITY_LIST = ["one_hot_labels", "bb_coordinates", "cropped_image_feature", "bb3d_coordinates"]
+GRAPH_MODALITY_LIST = ["one_hot_labels", "clip_labels", "bb_coordinates", "cropped_image_feature", "bb3d_coordinates"]
 
 def combine_graph_modalities(graph_data, graph_mod, idx=None, j=None):
     if idx is None and j is None:
@@ -117,22 +118,37 @@ def fuse_graphs(graph_data_left, graph_data_right, mod, step_idx=None, is_croppe
     return fused_graph
 
 def handle_fusing(left, right, mod, cropped_fusion):
+    # Look up each modality by name, not by GRAPH_MODALITY_LIST position - a positional
+    # mapping silently breaks (wrong tag, wrong length, or a missing branch entirely) whenever
+    # a modality is inserted anywhere but the end of that list. This broke exactly that way
+    # when "clip_labels" was inserted at index 1: every following branch's slice tag/length
+    # was off by one and "bb3d_coordinates" (originally index 3) dropped out of the checks.
+    #
+    # Rank = the substring's start index in `mod` (e.g. "bb_coordinates_cropped_image_feature_
+    # one_hot_labels"), so modalities are sliced out in the same order they were concatenated
+    # in - this must work for any number of joined modalities, not just two. The previous
+    # `mod.split(name).index('')` trick only ever found a rank when `name` was a prefix (split
+    # -> ['', rest]) or suffix (split -> [rest, '']) of `mod`; for 3+ joined modalities the
+    # middle one splits into two non-empty parts and `.index('')` raises `ValueError`.
     active_mods = []
-    
-    if GRAPH_MODALITY_LIST[0] in mod:
-        ohl_index = mod.split(GRAPH_MODALITY_LIST[0]).index('')
+
+    if "one_hot_labels" in mod:
+        ohl_index = mod.find("one_hot_labels")
         ohl_length = 37
         active_mods.append((ohl_index, 'ohl', ohl_length))
-    if GRAPH_MODALITY_LIST[1] in mod:
-        bb_index = mod.split(GRAPH_MODALITY_LIST[1]).index('')
+    if "clip_labels" in mod:
+        clip_index = mod.find("clip_labels")
+        active_mods.append((clip_index, 'clip', CLIP_LABEL_DIM))
+    if "bb_coordinates" in mod:
+        bb_index = mod.find("bb_coordinates")
         bb_length = 10
         active_mods.append((bb_index, 'bb', bb_length))
-    if GRAPH_MODALITY_LIST[2] in mod:
-        cropped_index = mod.split(GRAPH_MODALITY_LIST[2]).index('')
+    if "cropped_image_feature" in mod:
+        cropped_index = mod.find("cropped_image_feature")
         # We use -1 as placeholder for dynamic length
         active_mods.append((cropped_index, 'crop', -1))
-    if GRAPH_MODALITY_LIST[3] in mod:
-        bb3d_index = mod.split(GRAPH_MODALITY_LIST[3]).index('')
+    if "bb3d_coordinates" in mod:
+        bb3d_index = mod.find("bb3d_coordinates")
         active_mods.append((bb3d_index, 'bb3d', BB3D_FEATURE_DIM))
 
     # 2. Sort by rank (position in the tensor)

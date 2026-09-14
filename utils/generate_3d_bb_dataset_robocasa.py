@@ -439,9 +439,11 @@ def extract_task(
     output_path: str = None,
     resume: bool = True,
     frame_mode: str = "full",
+    mask_objects: list[str] = None,
 ):
     if frame_mode not in FRAME_MODES:
         raise ValueError(f"Unknown frame_mode: {frame_mode!r}, expected one of {FRAME_MODES}")
+    mask_objects = mask_objects or []
     demo_file = os.path.join(dataset_path, task_name, "demo_gentex_im128_randcams.hdf5")
     env, f = build_env(demo_file, seed=seed)
     pf = env.robots[0].robot_model.naming_prefix
@@ -509,6 +511,8 @@ def extract_task(
                     if obj_id == 0 or obj_id not in id_to_cls:
                         continue
                     name = id_to_cls[obj_id]
+                    if name in mask_objects:
+                        continue
                     pts = backproject_mask_to_world(seg == obj_id, depth, K, cam_to_world)
                     if pts is None:
                         continue
@@ -566,6 +570,14 @@ if __name__ == "__main__":
         "RoboCasaKitchenTester.bb3d_frame_mode at inference time.",
     )
     parser.add_argument(
+        "--mask_objects",
+        nargs="*",
+        default=[],
+        help="Object/fixture names to drop from the extracted graph, e.g. PandaMobile "
+        "PandaGripper Wall Counter Floor. MUST match kitchen.py's "
+        "RoboCasaKitchenTester.mask_objects at inference time.",
+    )
+    parser.add_argument(
         "--stats_only",
         action="store_true",
         help="Skip extraction. Print feature diagnostics and (re)compute+save "
@@ -600,6 +612,7 @@ if __name__ == "__main__":
         output_path=output_path,
         resume=not args.no_resume,
         frame_mode=args.frame_mode,
+        mask_objects=args.mask_objects,
     )
 
     if output_path is not None:

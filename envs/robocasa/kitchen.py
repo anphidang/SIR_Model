@@ -17,7 +17,7 @@ import logging
 from networks.vision_encoder.cnn import SimpleImageEncoder
 from networks.vision_encoder.utils import crop_and_resize_to_64, crop_and_resize_to_64_for_fusion
 from utils.create_graphs import create_graph_datapoint
-from utils.generate_graph_dataset_robocasa import OBJECT_NAMES_IMAGES, get_bb_pos
+from utils.generate_graph_dataset_robocasa import OBJECT_NAMES_IMAGES, get_bb_pos, get_clip_label_embeddings
 from utils.generate_3d_bb_dataset_robocasa import (
     BB3D_FEATURE_DIM,
     FRAME_MODES,
@@ -42,10 +42,12 @@ class RoboCasaKitchenTester():
                  use_depth: bool,
                  cropped_image_feature_encoder: torch.nn.Module = None,
                  bb3d_frame_mode: str = "full",
+                 mask_objects: list[str] = None,
                  ):
         if bb3d_frame_mode not in FRAME_MODES:
             raise ValueError(f"Unknown bb3d_frame_mode: {bb3d_frame_mode!r}, expected one of {FRAME_MODES}")
         self.bb3d_frame_mode = bb3d_frame_mode
+        self.mask_objects = set(mask_objects or [])
         # Same frozen stats used to normalize the offline graphs (generate_3d_bb_graph_dataset_robocasa.py)
         # - MUST be the same file, or rollout features are on a different scale than training.
         # Enforced, not just commented: create_3d_bb_graphs_and_save() writes a hash of the
@@ -257,6 +259,9 @@ class RoboCasaKitchenTester():
                 one_hot[index] = 1.0
                 objects.append(one_hot)
             left_objects = torch.stack(objects)
+        elif mod == "clip_labels":
+            clip_embeddings = get_clip_label_embeddings()
+            left_objects = torch.stack([clip_embeddings[name] for name in left_object_names])
         elif mod == "bb_coordinates":
             objects = []
             for i in range(left_boxes.shape[0]):
@@ -293,6 +298,9 @@ class RoboCasaKitchenTester():
                 one_hot[index] = 1.0
                 objects.append(one_hot)
             right_objects = torch.stack(objects)
+        elif mod == "clip_labels":
+            clip_embeddings = get_clip_label_embeddings()
+            right_objects = torch.stack([clip_embeddings[name] for name in right_object_names])
         elif mod == "bb_coordinates":
             objects = []
             for i in range(right_boxes.shape[0]):
@@ -356,6 +364,8 @@ class RoboCasaKitchenTester():
                 if obj_id == 0 or obj_id not in id_to_cls:
                     continue
                 name = id_to_cls[obj_id]
+                if name in self.mask_objects:
+                    continue
                 pts = backproject_mask_to_world(seg == obj_id, depth, K, cam_to_world)
                 if pts is None:
                     continue
@@ -387,7 +397,7 @@ class RoboCasaKitchenTester():
         obj_ids_unique = torch.unique(mask)
         obj_ids = []
         for id in cls_numbers:
-            if id in obj_ids_unique:
+            if id in obj_ids_unique and list(cls_list.keys())[id - 1] not in self.mask_objects:
                 obj_ids.append(id)
         obj_ids = torch.tensor(obj_ids)
 

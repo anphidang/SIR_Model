@@ -30,13 +30,20 @@ prop_modalities: [] #["robot0_gripper_qpos", "robot0_joint_pos", "robot0_eef_pos
 image_modalities: [] #["inhand", "left", "right"]
 
 # Graph-Based Modality
-graph_modalities: ["bb3d_coordinates", "cropped_image_feature"] #["one_hot_labels", "bb_coordinates", "bb3d_coordinates", "cropped_image_feature"]
+graph_modalities: ["bb3d_coordinates", "cropped_image_feature"] #["one_hot_labels", "clip_labels", "bb_coordinates", "bb3d_coordinates", "cropped_image_feature"]
+# clip_labels: CLIP ViT-B/32 text embedding of the object's class name (512-dim), computed
+# once and cached in-process - see get_clip_label_embeddings() in generate_graph_dataset_robocasa.py.
+# Drop-in alternative to one_hot_labels (same per-node lookup-by-name), not a replacement for
+# bb_coordinates/cropped_image_feature - combine e.g. ["bb_coordinates", "cropped_image_feature", "clip_labels"].
 # bb3d_coordinates requires bb3d_dataset.hdf5 per task, generated via
 # utils/generate_3d_bb_dataset_robocasa.py --task <task> beforehand.
 # Must match the --frame_mode used to generate that file - "full" (SE(3) into the gripper
 # frame) or "translation_only" (subtract gripper position, keep world-aligned axes; stays
 # consistent with world/base-frame OSC action deltas). See generate_3d_bb_dataset_robocasa.py.
 bb3d_frame_mode: "translation_only"
+mask_objects: [] # e.g. ["PandaMobile", "PandaGripper", "Wall", "Counter", "Floor"] to drop from graph nodes
+                 # bb3d_coordinates: only takes effect if the cached bb3d_dataset.hdf5 was
+                 # generated with the same --mask_objects, see generate_3d_bb_dataset_robocasa.py
 pretrained_img_encoder_name: "cropped_image_feature_encoder_fusion_dim_37" # cropped_image_feature_encoder_dim_256, cropped_image_feature_encoder_dim_37
 use_graph_fusion: True
 use_splitted_modalities: False  

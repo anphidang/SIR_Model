@@ -1,4 +1,7 @@
 import os
+import re
+
+import clip
 import h5py
 import networkx as nx
 import numpy as np
@@ -48,11 +51,41 @@ OBJECT_NAMES_IMAGES = ['OmronMobileBase',
                 'container',
                 'cookware']
 
+CLIP_LABEL_DIM = 512  # CLIP ViT-B/32 text embedding dimension
+
+_clip_label_embeddings = None  # lazy cache, keyed by raw OBJECT_NAMES_IMAGES entry
+
+def _object_name_to_phrase(name: str) -> str:
+    """'PandaGripper' -> 'panda gripper', 'distr_counter_0' -> 'distr counter 0'."""
+    spaced = re.sub(r"(?<!^)(?=[A-Z])", " ", name)
+    return spaced.replace("_", " ").lower().strip()
+
+@torch.no_grad()
+def get_clip_label_embeddings(device: str = "cpu") -> dict:
+    """CLIP ViT-B/32 text embedding per name in OBJECT_NAMES_IMAGES, computed once and
+    cached module-wide. Keyed by the raw object name, same lookup key one_hot_labels
+    uses (OBJECT_NAMES_IMAGES.index(name)), so callers can swap the two modalities
+    without touching the node-name bookkeeping."""
+    global _clip_label_embeddings
+    if _clip_label_embeddings is None:
+        model, _ = clip.load("ViT-B/32", device=device)
+        phrases = [_object_name_to_phrase(name) for name in OBJECT_NAMES_IMAGES]
+        tokens = clip.tokenize(phrases).to(device)
+        embeddings = model.encode_text(tokens).float()
+        # Raw encode_text output has L2 norm ~8.7-11.7 (measured), vs. one-hot's fixed norm of
+        # 1.0 - normalize so the label sub-vector isn't larger in scale purely from being CLIP.
+        embeddings = embeddings / embeddings.norm(dim=-1, keepdim=True)
+        _clip_label_embeddings = {
+            name: embeddings[i].cpu() for i, name in enumerate(OBJECT_NAMES_IMAGES)
+        }
+    return _clip_label_embeddings
+
 @torch.no_grad()
 def create_graphs_and_save(dataset_path: str,
                            task_name: str,
                            graph_modality: str,
                            encoder_model: torch.nn.Module = None,
+                           mask_objects: list = None,
                         ):
     full_dataset_path = os.path.join(dataset_path, task_name, "dataset_raw.hdf5")
     
@@ -97,7 +130,7 @@ def create_graphs_and_save(dataset_path: str,
         inner_permutation = np.argsort(np.array([int(i) for i in inner_raw_list]))
         
         for j in tqdm(range(int(list(inner_raw_list[inner_permutation])[-1]) + 1)):
-            left_object_names, left_objects, right_object_names, right_objects = extract_graph_objects(dataset, key, j, graph_modality, left_image[j], right_image[j], encoder_model)
+            left_object_names, left_objects, right_object_names, right_objects = extract_graph_objects(dataset, key, j, graph_modality, left_image[j], right_image[j], encoder_model, mask_objects)
                 
             left_data_point = create_graph_datapoint(left_graph, left_object_names, left_objects)
             temp_data_left.append(left_data_point)
@@ -112,25 +145,29 @@ def create_graphs_and_save(dataset_path: str,
             graph_modality = graph_modality + "_fusion_" + str(encoder_model.fc.out_features)
         else:
             graph_modality = graph_modality + "_" + str(encoder_model.fc_layer.out_features)
-    
+    if mask_objects:
+        graph_modality = graph_modality + "_mask_" + "_".join(sorted(mask_objects))
+
     torch.save(all_data_left, dataset_path + task_name + "/" + graph_modality + "_left_image.pth")
     torch.save(all_data_right, dataset_path + task_name + "/" + graph_modality + "_right_image.pth")
 
-def extract_graph_objects(dataset, key, j, graph_modality: str, left_img, right_img, encoder_model: torch.nn.Module = None):
+def extract_graph_objects(dataset, key, j, graph_modality: str, left_img, right_img, encoder_model: torch.nn.Module = None, mask_objects: list = None):
     left_object_names: list = list(dataset[key][str(j)]["left_image"].keys())
     left_objects = dataset[key][str(j)]["left_image"]
     right_object_names: list = list(dataset[key][str(j)]["right_image"].keys())
     right_objects = dataset[key][str(j)]["right_image"]
-    
+
     if graph_modality == "one_hot_labels":
         object_representation = "bb" # Just a placeholder, because one hot labels do not have extra representation
+    elif graph_modality == "clip_labels":
+        object_representation = "bb" # same placeholder reasoning as one_hot_labels
     elif graph_modality == "bb_coordinates":
         object_representation = "bb"
     elif graph_modality == "cropped_image_feature":
         object_representation = "MorphMask"
-    
-    left_objects, left_object_names = get_adjusted_objects_and_names(left_object_names, left_objects, object_representation)
-    right_objects, right_object_names = get_adjusted_objects_and_names(right_object_names, right_objects, object_representation)
+
+    left_objects, left_object_names = get_adjusted_objects_and_names(left_object_names, left_objects, object_representation, mask_objects)
+    right_objects, right_object_names = get_adjusted_objects_and_names(right_object_names, right_objects, object_representation, mask_objects)
     
     left_objects, right_objects = get_node_features(left_objects, right_objects, left_object_names, right_object_names, left_img, right_img, graph_modality, encoder_model)
     
@@ -139,12 +176,15 @@ def extract_graph_objects(dataset, key, j, graph_modality: str, left_img, right_
     
     return left_object_names, left_objects, right_object_names, right_objects
 
-def get_adjusted_objects_and_names(object_names, objects, object_representation: str):
+def get_adjusted_objects_and_names(object_names, objects, object_representation: str, mask_objects: list = None):
+    mask_objects = mask_objects or []
     new_objects = []
     new_object_names = []
     for _, object_name in enumerate(object_names):
         if object_representation in object_name:
             temp = object_name.split("_" + object_representation)[0]
+            if temp in mask_objects:
+                continue
             new_object_names.append(temp)
             new_objects.append(objects[object_name][()])
     return new_objects, new_object_names
@@ -170,6 +210,9 @@ def get_node_features(objects_left,
             obj_feature = torch.zeros((len(OBJECT_NAMES_IMAGES)))
             obj_feature[OBJECT_NAMES_IMAGES.index(object_names_left[i])] = 1
             feature_vec_left.append(obj_feature)
+        elif graph_modality == "clip_labels":
+            clip_embeddings = get_clip_label_embeddings()
+            feature_vec_left.append(clip_embeddings[object_names_left[i]])
         elif graph_modality == "bb_coordinates":
             bbox = objects_left[i]
             pos_feature = torch.tensor(get_bb_pos(bbox)) / 127
@@ -197,6 +240,9 @@ def get_node_features(objects_left,
             obj_feature = torch.zeros((len(OBJECT_NAMES_IMAGES)))
             obj_feature[OBJECT_NAMES_IMAGES.index(object_names_right[i])] = 1
             feature_vec_right.append(obj_feature)
+        elif graph_modality == "clip_labels":
+            clip_embeddings = get_clip_label_embeddings()
+            feature_vec_right.append(clip_embeddings[object_names_right[i]])
         elif graph_modality == "bb_coordinates":
             bbox = objects_right[i]
             pos_feature = torch.tensor(get_bb_pos(bbox)) / 127

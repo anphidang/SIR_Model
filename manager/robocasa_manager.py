@@ -6,7 +6,7 @@ from envs.robocasa.kitchen import RoboCasaKitchenTester
 from envs.robocasa.utils import TASK_LIST
 from manager.base_manager import Base_Manager
 from networks.vision_encoder.utils import load_pretrained_image_encoder
-from utils.generate_graph_dataset_robocasa import OBJECT_NAMES_IMAGES, create_graphs_and_save
+from utils.generate_graph_dataset_robocasa import CLIP_LABEL_DIM, OBJECT_NAMES_IMAGES, create_graphs_and_save
 from utils.generate_3d_bb_graph_dataset_robocasa import BB3D_FEATURE_DIM, create_3d_bb_graphs_and_save
 
 import logging
@@ -33,6 +33,7 @@ class RoboCasa_Manager(Base_Manager):
         use_graph_fusion: bool = False,
         use_splitted_modalities: bool = False,
         bb3d_frame_mode: str = "full",
+        mask_objects: list = None,
     ):
         super().__init__(
             data_path,
@@ -52,6 +53,7 @@ class RoboCasa_Manager(Base_Manager):
         
         self.times_repeat = times_repeat
         self.bb3d_frame_mode = bb3d_frame_mode
+        self.mask_objects = mask_objects or []
 
         self.use_graph_fusion = use_graph_fusion
         self.use_splitted_modalities = use_splitted_modalities
@@ -106,14 +108,23 @@ class RoboCasa_Manager(Base_Manager):
                     crop_str = "_fusion" + crop_str
             else:
                 crop_str = ""
-            
+
+            # bb3d_coordinates masking lives in the offline bb3d_dataset.hdf5 (generated
+            # separately via generate_3d_bb_dataset_robocasa.py --mask_objects), not in this
+            # cache, so mask_str must not apply there - it would falsely invalidate/collide
+            # bb3d's cache path.
+            if mod != "bb3d_coordinates" and self.mask_objects:
+                mask_str = "_mask_" + "_".join(sorted(self.mask_objects))
+            else:
+                mask_str = ""
+
             if self.task_names[0] == "ALL":
                 task_names = TASK_LIST
             else:
                 task_names = self.task_names
             for task_name in task_names:
-                right_graph = not os.path.isfile(os.path.join(self.data_path, task_name, mod + crop_str + "_right_image.pth"))
-                left_graph = not os.path.isfile(os.path.join(self.data_path, task_name, mod + crop_str + "_left_image.pth"))
+                right_graph = not os.path.isfile(os.path.join(self.data_path, task_name, mod + crop_str + mask_str + "_right_image.pth"))
+                left_graph = not os.path.isfile(os.path.join(self.data_path, task_name, mod + crop_str + mask_str + "_left_image.pth"))
                 if right_graph or left_graph:
                     datasets_to_create.append((task_name, mod))
         
@@ -137,6 +148,7 @@ class RoboCasa_Manager(Base_Manager):
                         task_name=task,
                         graph_modality=mod,
                         encoder_model=self.cropped_image_feature_encoder,
+                        mask_objects=self.mask_objects,
                     )
     
     def test_method(self, method, store_videos, eval_n_times, working_dir, during_training=False, epoch=None):
@@ -154,6 +166,7 @@ class RoboCasa_Manager(Base_Manager):
                 use_depth="bb3d_coordinates" in self.graph_modalities,
                 cropped_image_feature_encoder=self.cropped_image_feature_encoder,
                 bb3d_frame_mode=self.bb3d_frame_mode,
+                mask_objects=self.mask_objects,
             )
             
             results = tester.test(
@@ -233,6 +246,8 @@ class RoboCasa_Manager(Base_Manager):
         for mod in self.adapted_graph_modalities:
             if "one_hot_labels" in mod:
                 dim[mod] += len(OBJECT_NAMES_IMAGES)
+            if "clip_labels" in mod:
+                dim[mod] += CLIP_LABEL_DIM
             if "bb_coordinates" in mod:
                 dim[mod] += 10 * factor
                 # graph_edge_dim = 4
