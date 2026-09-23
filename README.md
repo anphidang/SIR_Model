@@ -1,109 +1,189 @@
-# SIR: Structured Image Representations for Explainable Robot Learning
-[Paper](https://paulmattes.github.io/publication/conference-paper/), [Project Page](https://intuitive-robots.github.io/SIR_website/), [CVPR 2026]()
+# SIR reproduction and node-representation study (fork)
 
-[Paul Mattes](https://paulmattes.github.io/)<sup>1</sup>,
-Jan Schwab,
-Jens Bosch,
-Maximilian Li,
-Nils Blank,
-Minh-Trung Tang,
-Moritz Haberland and
-[Rudolf Lioutikov](http://rudolf.intuitive-robots.net/)<sup>1</sup>
+This is **not** the official SIR repository. It is a fork of
+[intuitive-robots/SIR_Model](https://github.com/intuitive-robots/SIR_Model), created for a project in the
+IROBMAN Project Lab (*Praktikum zur intelligenten Robotermanipulation*, TU Darmstadt, summer semester 2026).
+It adds what is needed to train the sparsified SIR configuration, together with the experiments described
+in the accompanying report:
 
-<sup>1</sup>Intuitive Robots Lab, Karlsruhe Institute of Technology
+**Report:** [Structured Image Representations for Explainable Robot Learning — a reproduction of SIR and an
+assessment of whether its sparsification transfers across node modalities](LINK-TO-REPORT) (An-Phi Dang, 2026)
 
-This is the official code repository for the paper [SIR: Structured Image Representations for Explainable Robot Learning](https://paulmattes.github.io/publication/conference-paper/).
+All credit for the method and the original code goes to the SIR authors:
+
+> Paul Mattes, Jan Schwab, Jens Bosch, Maximilian Li, Nils Blank, Minh-Trung Tang, Moritz Haberland and
+> Rudolf Lioutikov. **SIR: Structured Image Representations for Explainable Robot Learning.** CVPR 2026.
+> [Paper](https://openaccess.thecvf.com/content/CVPR2026/html/Mattes_SIR_Structured_Image_Representations_for_Explainable_Robot_Learning_CVPR_2026_paper.html) ·
+> [Project page](https://intuitive-robots.github.io/SIR_website/) ·
+> [Original code](https://github.com/intuitive-robots/SIR_Model)
+
+If you use the method, please cite the original paper (see [Citation](#citation)).
+
+## What this fork changes
+
+The fork is based on upstream commit `5ea851e`; upstream `19d1d57` and `c0e8a2e` differ from it only in the README.
+
+| Change | Files | Purpose |
+|:---|:---|:---|
+| `Multi_XAI_GNN` wrapper | `networks/graph_encoder/gnn.py` | The released `xai_gnn.yaml` points to a class `Multi_XAI_GNN` that does not exist upstream, so the sparsified configuration cannot be trained there. The wrapper runs the released `Sparsification_Module` per modality and passes the retained sub-graph to the GNN. Sparsifier hyperparameters are unchanged. |
+| Score-weighted readout, `selection_accuracy` logging | `networks/graph_encoder/gnn.py` | Pooling weighted by node scores; logging-only diagnostic of which nodes are retained |
+| Unit tests for the sparsifier | `test_xai_gnn.py` | CPU-only checks on synthetic graphs (shapes, *k* nodes kept, gradient flow) |
+| 3D oriented bounding boxes (`bb3d_coordinates`) | `utils/generate_3d_bb_dataset_robocasa.py`, `utils/generate_3d_bb_graph_dataset_robocasa.py`, `dataloader/`, `manager/` | Node geometry as a 12-D oriented 3D box relative to the gripper (`full` or `translation_only` frame) |
+| CLIP label embeddings (`clip_labels`) | `utils/generate_graph_dataset_robocasa.py` | Node labels as L2-normalised CLIP ViT-B/32 text embeddings instead of one-hot vectors |
+| Node masking (`mask_objects`) | `dataloader/utils.py`, `manager/robocasa_manager.py`, `envs/robocasa/kitchen.py` | Remove given object classes from every graph, at training and rollout time |
+| Data-pipeline and RoboCasa fixes | `dataloader/`, `manager/`, `envs/robocasa/kitchen.py` | Fixes needed to run the pipeline end to end |
+| Run scripts | `run_all.sh`, `configs/mask_sweep.yaml` | SIR / fully connected / image runs on TurnOffSinkFaucet; masking sweep |
+
+Note that `configs/method/diffusion.yaml` now uses the sparsified encoder (`xai_gnn`) by default. Use
+`method/graph_encoder=gnn` for the fully connected graph.
+
+<!-- TODO before publishing: the load-time masking fix, the proprioception runs (E1d/E1e) and
+     utils/inspect_subgraphs.py are not yet on GitHub (branch HEAD is 550164c). Commit and push them,
+     and put the final commit hash into the report. -->
 
 ## Installation
 
-1. Start installation using the install.sh
-```
-cd sir
-sh install.sh
-```
+SIR, robosuite and RoboCasa must be cloned **next to each other** in one parent folder, not inside each other.
 
-Following instructions are taken from here: https://github.com/robocasa/robocasa
+1. Clone this fork and create the conda environment (the script asks for an environment name):
 
-All installations should NOT be done in the SIR folder. RoboCasa and SIR, should be in one folder.
+   ```bash
+   git clone -b sir-anpassungen https://github.com/anphidang/SIR_Model.git
+   cd SIR_Model
+   bash install.sh
+   conda activate <your-env-name>
+   ```
 
-2. Copy robosuite repo and install it using
+2. Install robosuite (branch `robocasa_v0.1`):
 
-```
-cd ..
-git clone -b robocasa_v0.1 https://github.com/ARISE-Initiative/robosuite
-cd robosuite
-pip install -e .
-python robosuite/scripts/setup_macros.py
-```
+   ```bash
+   cd ..
+   git clone -b robocasa_v0.1 https://github.com/ARISE-Initiative/robosuite
+   cd robosuite
+   pip install -e .
+   python robosuite/scripts/setup_macros.py
+   ```
 
-For Windows user: https://robosuite.ai/docs/installation.html
+   Windows users: see the [robosuite installation guide](https://robosuite.ai/docs/installation.html).
 
-3. Copy robocasa repo and install it. Afterwards download kitchen assets and setup macro
-```
-cd ..
-git clone https://github.com/robocasa/robocasa
-cd robocasa
-git reset --hard 370f986aa3934be6c134ecb978952423df9a1ed0
-pip install -e .
-python robocasa/scripts/download_kitchen_assets.py
-python robocasa/scripts/setup_macros.py
-```
+3. Install RoboCasa from the fork [anphidang/robocasa-sir](https://github.com/anphidang/robocasa-sir),
+   branch `sir-anpassungen`. It is upstream RoboCasa at commit `370f986` with the changes to `kitchen.py`
+   that SIR requires (seeding, `camera_segmentations="class"`, `mujoco_objects`) already applied:
 
-# File Changes
+   ```bash
+   cd ..
+   git clone -b sir-anpassungen https://github.com/anphidang/robocasa-sir.git robocasa
+   cd robocasa
+   pip install -e .
+   python robocasa/scripts/download_kitchen_assets.py
+   python robocasa/scripts/setup_macros.py
+   ```
 
-Following files need to be changed in the robosuite and robocasa repos
+4. Apply the two remaining changes to robosuite by hand.
 
-### Robosuite
+   In `robosuite/macros_private.py`, set `IMAGE_CONVENTION = "opencv"` (default: `"opengl"`).
 
-Change in robosuite/macros_private.py IMAGE_CONVENTION from opgengl to opencv
+   In `robosuite/models/tasks/task.py`, define `self.count = 0` in `__init__` and add the following after
+   line 112:
 
-Also add the following code in `robosuite/robosuite/models/tasks/task.py` and define `self.count = 0` in the init method. 
+   ```python
+   if cls == "MJCFObject":
+       cls = model.name
+   self.count += 1
+   if self.count > 3:
+       for geom in model.contact_geoms:
+           if geom not in sim.model.geom_names:
+               print("removed: ", geom)
+               geom_name = geom.split("_")[-1]
+               model._contact_geoms.remove(geom_name)
+       for geom in model.visual_geoms:
+           if geom not in sim.model.geom_names:
+               print("removed: ", geom)
+               geom_name = geom.split("_")[-1]
+               model._visual_geoms.remove(geom_name)
+   ```
 
-Add after line 112: 
+5. Adjust the local paths and the W&B account, which are currently set to the author's machine:
 
-```
-if cls == "MJCFObject":
-    cls = model.name
-self.count += 1
-if self.count > 3:
-    for geom in model.contact_geoms:
-        if geom not in sim.model.geom_names:
-            print("removed: ", geom)
-            geom_name = geom.split("_")[-1]
-            model._contact_geoms.remove(geom_name)
-    for geom in model.visual_geoms:
-        if geom not in sim.model.geom_names:
-            print("removed: ", geom)
-            geom_name = geom.split("_")[-1]
-            model._visual_geoms.remove(geom_name)
-```
+   | File | Key |
+   |:---|:---|
+   | `configs/manager/robocasa.yaml` | `data_path` |
+   | `configs/main.yaml` | `trainer.log_dir`, `wandb.entity`, `wandb.project` |
 
-### RoboCasa
+   These can also be overridden on the command line, e.g. `manager.data_path=/path/to/data`.
 
-#### robocasa/environments/kitchen/kitchen.py
+## Data
 
-All line-numbers refer to the original code, without the changes made previously in the files, respectively. 
+The pre-built graph datasets from the SIR authors are on HuggingFace:
+[MrLayen/SIR_robocasa](https://huggingface.co/datasets/MrLayen/SIR_robocasa). Place them under `data_path`.
 
-Add below line 230 (right at the start of the init function)
+The 3D bounding boxes are not part of that dataset and must be generated per task before training with
+`bb3d_coordinates`. The `--frame_mode` must match `manager.bb3d_frame_mode`:
 
-```
-np.random.seed(seed)
-random.seed(seed)
-```
-
-Add to the end of the super().init() function after line 313:
-
-```
-camera_segmentations="class",
-```
-
-Additionally, you need to add the following code below every `self.model.merge_objects([model])` starting from line 478 (3 times: after 507, 483, 474):
-
-```
-self.model.mujoco_objects.append(model)
+```bash
+python utils/generate_3d_bb_dataset_robocasa.py --task CloseSingleDoor --frame_mode translation_only
 ```
 
-# Datasets
+## Running the experiments
 
-The graph datasets for RoboCasa are uploaded to HuggingFace.
-https://huggingface.co/datasets/MrLayen/SIR_robocasa
+All runs in the report use CloseSingleDoor, seed 42 (43 for the second SIR seed), 50 epochs and an
+evaluation with 100 rollouts (`trainer.eval_n_times=20` × `manager.times_repeat=5`). A common prefix:
+
+```bash
+COMMON="manager.task_names=[CloseSingleDoor] trainer.seed=42 trainer.epochs=50 trainer.test_bool=True trainer.eval_n_times=20"
+```
+
+| Report ID | Description | Overrides (in addition to `$COMMON`) |
+|:---|:---|:---|
+| R_fc_graph | Fully connected graph | `method/graph_encoder=gnn manager.graph_modalities=[bb_coordinates,cropped_image_feature]` |
+| R_sir_seed42 / E1b | SIR | `method/graph_encoder=xai_gnn manager.graph_modalities=[bb_coordinates,cropped_image_feature]` |
+| R_sir_seed43 | SIR, second seed | as above with `trainer.seed=43` |
+| E1a | Robot and fixture nodes masked | SIR + `manager.mask_objects=[PandaMobile,PandaGripper,Wall,Counter,Floor]` |
+| E1c | Fixture nodes masked | SIR + `manager.mask_objects=[Wall,Counter,Floor]` |
+| E1d | E1a + proprioception | E1a + `manager.prop_modalities=[robot0_base_to_eef_pos,robot0_base_to_eef_quat,robot0_gripper_qpos]` |
+| E1e | SIR + proprioception | SIR + the same `manager.prop_modalities` |
+| E2a | CLIP labels | SIR with `manager.graph_modalities=[bb_coordinates,cropped_image_feature,clip_labels]` |
+| E2b | One-hot labels | SIR with `manager.graph_modalities=[bb_coordinates,cropped_image_feature,one_hot_labels]` |
+| E2fc | CLIP labels, fully connected | E2a with `method/graph_encoder=gnn` |
+| E3a-full / E3a-trans | 3D boxes | `manager.graph_modalities=[bb3d_coordinates,cropped_image_feature] manager.bb3d_frame_mode=full` (or `translation_only`) + `method.graph_encoder.sparsification_layer.sampling_strategy=topk` |
+| E3b | 2D control for E3 | as E3 with `bb_coordinates` instead of `bb3d_coordinates` |
+
+<!-- TODO: check every row against the saved Hydra config (.hydra/overrides.yaml) of the actual run.
+     In particular: do E1b and the R_* runs include one_hot_labels, and is the override path for
+     sampling_strategy correct? -->
+
+Example:
+
+```bash
+python main.py $COMMON method/graph_encoder=xai_gnn \
+  manager.graph_modalities=[bb_coordinates,cropped_image_feature,clip_labels] \
+  wandb.run_name=E2a
+```
+
+The unit tests for the sparsifier run without dataset or simulator:
+
+```bash
+python test_xai_gnn.py
+```
+
+## Known limitations
+
+- Edge features are a constant 1.0 in the released code (`calculate_weight_dim_distance` in
+  `dataloader/utils.py` is commented out); this fork does not change that.
+- The image-only baseline (`manager.graph_modalities=[]`) did not produce a usable result on the
+  machines used for the report.
+
+## Citation
+
+Please cite the original paper:
+
+```bibtex
+@InProceedings{Mattes_2026_CVPR,
+    author    = {Mattes, Paul and Schwab, Jan and Bosch, Jens and Li, Maximilian Xiling and Blank, Nils and Tang, Minh-Trung and Haberland, Moritz and Lioutikov, Rudolf},
+    title     = {SIR: Structured Image Representations for Explainable Robot Learning},
+    booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)},
+    month     = {June},
+    year      = {2026},
+    pages     = {42484-42493}
+}
+```
