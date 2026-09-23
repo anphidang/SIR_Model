@@ -6,8 +6,8 @@ IROBMAN Project Lab (*Praktikum zur intelligenten Robotermanipulation*, TU Darms
 It adds what is needed to train the sparsified SIR configuration, together with the experiments described
 in the accompanying report:
 
-**Report:** [Structured Image Representations for Explainable Robot Learning — a reproduction of SIR and an
-assessment of whether its sparsification transfers across node modalities](LINK-TO-REPORT) (An-Phi Dang, 2026)
+**Report:** *Structured Image Representations for Explainable Robot Learning — a reproduction of SIR and an
+assessment of whether its sparsification transfers across node modalities* (An-Phi Dang, 2026)
 
 All credit for the method and the original code goes to the SIR authors:
 
@@ -37,10 +37,6 @@ The fork is based on upstream commit `5ea851e`; upstream `19d1d57` and `c0e8a2e`
 Note that `configs/method/diffusion.yaml` now uses the sparsified encoder (`xai_gnn`) by default. Use
 `method/graph_encoder=gnn` for the fully connected graph.
 
-<!-- TODO before publishing: the load-time masking fix, the proprioception runs (E1d/E1e) and
-     utils/inspect_subgraphs.py are not yet on GitHub (branch HEAD is 550164c). Commit and push them,
-     and put the final commit hash into the report. -->
-
 ## Installation
 
 SIR, robosuite and RoboCasa must be cloned **next to each other** in one parent folder, not inside each other.
@@ -54,17 +50,22 @@ SIR, robosuite and RoboCasa must be cloned **next to each other** in one parent 
    conda activate <your-env-name>
    ```
 
-2. Install robosuite (branch `robocasa_v0.1`):
+2. Install robosuite from the fork [anphidang/robosuite](https://github.com/anphidang/robosuite),
+   branch `robocasa_v0.1`. It is upstream robosuite `robocasa_v0.1` (commit `8ea59ea0`) with the two changes
+   SIR requires already applied: `IMAGE_CONVENTION = "opencv"` in `robosuite/macros.py`, and skipping of
+   stale contact/visual geoms in `Task.merge_objects` (`robosuite/models/tasks/task.py`):
 
    ```bash
    cd ..
-   git clone -b robocasa_v0.1 https://github.com/ARISE-Initiative/robosuite
+   git clone -b robocasa_v0.1 https://github.com/anphidang/robosuite.git
    cd robosuite
    pip install -e .
    python robosuite/scripts/setup_macros.py
    ```
 
-   Windows users: see the [robosuite installation guide](https://robosuite.ai/docs/installation.html).
+   `setup_macros.py` copies `macros.py` to `macros_private.py`; if a `macros_private.py` already exists,
+   check that it also sets `IMAGE_CONVENTION = "opencv"`. Windows users: see the
+   [robosuite installation guide](https://robosuite.ai/docs/installation.html).
 
 3. Install RoboCasa from the fork [anphidang/robocasa-sir](https://github.com/anphidang/robocasa-sir),
    branch `sir-anpassungen`. It is upstream RoboCasa at commit `370f986` with the changes to `kitchen.py`
@@ -79,31 +80,7 @@ SIR, robosuite and RoboCasa must be cloned **next to each other** in one parent 
    python robocasa/scripts/setup_macros.py
    ```
 
-4. Apply the two remaining changes to robosuite by hand.
-
-   In `robosuite/macros_private.py`, set `IMAGE_CONVENTION = "opencv"` (default: `"opengl"`).
-
-   In `robosuite/models/tasks/task.py`, define `self.count = 0` in `__init__` and add the following after
-   line 112:
-
-   ```python
-   if cls == "MJCFObject":
-       cls = model.name
-   self.count += 1
-   if self.count > 3:
-       for geom in model.contact_geoms:
-           if geom not in sim.model.geom_names:
-               print("removed: ", geom)
-               geom_name = geom.split("_")[-1]
-               model._contact_geoms.remove(geom_name)
-       for geom in model.visual_geoms:
-           if geom not in sim.model.geom_names:
-               print("removed: ", geom)
-               geom_name = geom.split("_")[-1]
-               model._visual_geoms.remove(geom_name)
-   ```
-
-5. Adjust the local paths and the W&B account, which are currently set to the author's machine:
+4. Adjust the local paths and the W&B account, which are currently set to the author's machine:
 
    | File | Key |
    |:---|:---|
@@ -147,10 +124,6 @@ COMMON="manager.task_names=[CloseSingleDoor] trainer.seed=42 trainer.epochs=50 t
 | E2fc | CLIP labels, fully connected | E2a with `method/graph_encoder=gnn` |
 | E3a-full / E3a-trans | 3D boxes | `manager.graph_modalities=[bb3d_coordinates,cropped_image_feature] manager.bb3d_frame_mode=full` (or `translation_only`) + `method.graph_encoder.sparsification_layer.sampling_strategy=topk` |
 | E3b | 2D control for E3 | as E3 with `bb_coordinates` instead of `bb3d_coordinates` |
-
-<!-- TODO: check every row against the saved Hydra config (.hydra/overrides.yaml) of the actual run.
-     In particular: do E1b and the R_* runs include one_hot_labels, and is the override path for
-     sampling_strategy correct? -->
 
 Example:
 
