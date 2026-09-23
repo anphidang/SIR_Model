@@ -1,3 +1,4 @@
+import os
 import numpy as np
 from torch import nn
 import torch
@@ -9,7 +10,7 @@ from torch_geometric.data import Data   #added by me
 
 from networks.graph_encoder.utils import debatch_graphs_masks, soft_histogram_loss, soft_histrogram_except_middle_loss
 from networks.transformer.transformer_decoders import TransformerFiLMDecoder
-from utils.generate_graph_dataset_robocasa import get_num_relevant_nodes_per_task, RELEVENT_NODES
+from utils.generate_graph_dataset_robocasa import get_num_relevant_nodes_per_task, RELEVENT_NODES, is_node_relevant_for_task
 
 class Multi_GNN(nn.Module):
     def __init__(self,
@@ -30,7 +31,7 @@ class Multi_GNN(nn.Module):
         for mod in modalities:
             self.models[mod] = GNN(input_dim[mod], hidden_dim, output_dim, edge_dim, num_layer, layer_name, pool_name, heads, dropout)
 
-    def forward(self, input, lang_emb=None, task_names=None):
+    def forward(self, input, lang_emb=None, task_names=None, lang_goals=None):
         for key in input:
             input[key] = self.models[key](input[key])
         return input
@@ -62,21 +63,26 @@ class Multi_XAI_GNN(nn.Module):
                 layer_name, pool_name, heads, dropout             
             )      
 
-    def forward(self, input, lang_emb=None, task_names=None):         
-        for key in input:             
-            graph = input[key]              
-            edge_weights, sampled_nodes, probs = self.sparsification_layers[key](                 
-                graph.x,                 
-                graph.edge_index,                 
-                graph.edge_attr,                 
-                graph.edge_attr,                 
-                lang_emb,                 
-                graph,                 
-                task_names,             
-            )              
-            
+    def forward(self, input, lang_emb=None, task_names=None, lang_goals=None):
+        # Ablation switch for the instruction -> sparsifier FiLM path only (the action generator
+        # still receives the real instruction embedding): SIR_LANG_ABLATION=zero feeds the
+        # sparsifier an all-zero lang_emb. Unset = normal behaviour.
+        if os.environ.get("SIR_LANG_ABLATION") == "zero" and lang_emb is not None:
+            lang_emb = torch.zeros_like(lang_emb)
+        for key in input:
+            graph = input[key]
+            edge_weights, sampled_nodes, probs = self.sparsification_layers[key](
+                graph.x,
+                graph.edge_index,
+                graph.edge_attr,
+                graph.edge_attr,
+                lang_emb,
+                graph,
+                task_names,
+            )
+
             self._dbg_probs = probs.detach()
-            self._log_selection_accuracy(graph, sampled_nodes, task_names)
+            self._log_selection_accuracy(graph, sampled_nodes, task_names, lang_goals)
 
             sparse_graph = self._build_sparse_graph(                 
                 graph, sampled_nodes, probs, edge_weights,                 
@@ -110,8 +116,9 @@ class Multi_XAI_GNN(nn.Module):
         return out            
         
 
-    def _log_selection_accuracy(self, graph, sampled_nodes, task_names):
+    def _log_selection_accuracy(self, graph, sampled_nodes, task_names, lang_goals=None):
         self.selection_accuracy = None
+        self.target_selection_accuracy = None
         names = getattr(graph, 'node_names', None)
         if names is None or not task_names:
             return
@@ -125,14 +132,25 @@ class Multi_XAI_GNN(nn.Module):
 
         batch_idx = graph.batch
         hits = total = 0
+        target_hits = 0
         for pos in sampled_nodes.tolist():
-            task = task_names[int(batch_idx[pos])]
+            b = int(batch_idx[pos])
+            task = task_names[b]
             if flat[pos] in RELEVENT_NODES[task]:
                 hits += 1
             total += 1
 
+            # target_selection_accuracy: same check, but door tasks also count the actual
+            # per-episode target object (e.g. "Microwave"/"HingeCabinet" for "close the
+            # microwave/cabinet door") as relevant, via is_node_relevant_for_task - RELEVENT_NODES
+            # alone only lists PandaMobile/PandaGripper for door tasks and never names the target.
+            lang_goal = lang_goals[b] if lang_goals is not None and b < len(lang_goals) else ""
+            if is_node_relevant_for_task(flat[pos], task, lang_goal):
+                target_hits += 1
+
         if total:
             self.selection_accuracy = torch.tensor(hits / total, device=graph.x.device)
+            self.target_selection_accuracy = torch.tensor(target_hits / total, device=graph.x.device)
 
         if not hasattr(self, "_dbg_done"):
             self._dbg_done = True

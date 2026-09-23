@@ -27,9 +27,15 @@ class RoboCasaDataset(Dataset):
                  cropped_img_dim: int,
                  model_name: str = None,
                  task_name: str = None,
+                 mask_objects: list = None,
     ):
         self.data_directory = data_directory
         self.task_name = task_name
+        # Applied post-hoc at fusion time (below), not at graph-generation time: the cached
+        # per-task .pth graphs are always the full/unmasked node set - see
+        # combine_graph_modalities/fuse_graphs in dataloader/utils.py and the note in
+        # manager/robocasa_manager.py:check_and_create_graph_dataset for why.
+        self.mask_objects = set(mask_objects or [])
         
         self.use_prop = True if len(prop_mod) > 0 else False
         self.use_img = True if len(img_mod) > 0 else False
@@ -53,6 +59,7 @@ class RoboCasaDataset(Dataset):
         
         self.actions = []
         self.lang_goals = []
+        self.lang_goals_text = []
         
         self.dataset_length = 0
         self.demo_lengths = []
@@ -109,6 +116,11 @@ class RoboCasaDataset(Dataset):
                         
             self.lang_goals.append(json.loads(data['data'][key].attrs.get("ep_meta", None))['lang'])
 
+        # Keep the raw instruction text (before CLIP-encoding overwrites self.lang_goals below):
+        # needed to identify the actual per-episode target object for door tasks, see
+        # utils.generate_graph_dataset_robocasa.is_node_relevant_for_task.
+        self.lang_goals_text = list(self.lang_goals)
+
         with torch.no_grad():
             lang_goal_tokenized = clip.tokenize(self.lang_goals)
             self.lang_goals = language_encoder.encode_text(lang_goal_tokenized).to(torch.float32)
@@ -117,21 +129,24 @@ class RoboCasaDataset(Dataset):
             # Update the class attribute so __getitem__ knows the new key
             self.graph_mod = [self.merged_mod_name]
 
+    @staticmethod
     def get_proprioceptive_obs(demo_data, mod):
+        # (was missing @staticmethod and concatenated raw numpy arrays with torch.concatenate,
+        # so any non-empty prop_modalities crashed dataset construction)
         modalities = []
         for m in mod:
-            modalities.append(demo_data[m][()])
-            if m == 'object':
-                temp_objects = torch.tensor(demo_data[m][()])
-                objects = torch.zeros((temp_objects.shape[0], 56))
-                objects[:,:temp_objects.shape[1]] = temp_objects
-                modalities.append(objects)
-        
-        observation = torch.concatenate((modalities), dim=-1).type(torch.float32)
-        return observation
-    
+            arr = torch.as_tensor(demo_data[m][()], dtype=torch.float32)
+            if m == 'object':  # fixed-width padding, see calculate_proprioceptive_dim
+                padded = torch.zeros((arr.shape[0], 56))
+                padded[:, :arr.shape[1]] = arr
+                arr = padded
+            modalities.append(arr)
+        return torch.cat(modalities, dim=-1)
+
     def get_image_obs(self, mod, idx):
-        img_tensor = torch.load(self.data_directory + "/img_tensor_demo_" + str(idx) + ".pth")
+        # mmap: train and valid datasets both load every demo, and the packed images are ~4 GB -
+        # memory-mapping shares one page-cache copy instead of holding two in RAM.
+        img_tensor = torch.load(self.data_directory + "/img_tensor_demo_" + str(idx) + ".pth", mmap=True)
         img_tensor = einops.rearrange(img_tensor, "step (num c h w) -> step num c h w", num=3, c=3, h=128, w=128)
         
         img_obs = {}
@@ -161,8 +176,8 @@ class RoboCasaDataset(Dataset):
             num_steps = len(self.graph_data_left[self.graph_mod[0]][idx])
             
             for j in range(num_steps):
-                new_data_left.append(combine_graph_modalities(self.graph_data_left, self.graph_mod, idx, j))
-                new_data_right.append(combine_graph_modalities(self.graph_data_right, self.graph_mod, idx, j))
+                new_data_left.append(combine_graph_modalities(self.graph_data_left, self.graph_mod, idx, j, self.mask_objects))
+                new_data_right.append(combine_graph_modalities(self.graph_data_right, self.graph_mod, idx, j, self.mask_objects))
             
             graph_data_left = {self.merged_mod_name: new_data_left}
             graph_data_right = {self.merged_mod_name: new_data_right}
@@ -182,7 +197,7 @@ class RoboCasaDataset(Dataset):
                 fused_graph_data[mod] = []
                 
                 for step_idx in range(len(graph_data_left[mod])):
-                    fused_graph_data[mod].append(fuse_graphs(graph_data_left, graph_data_right, mod, step_idx, self.is_cropped_fusion))                    
+                    fused_graph_data[mod].append(fuse_graphs(graph_data_left, graph_data_right, mod, step_idx, self.is_cropped_fusion, self.mask_objects))
             return fused_graph_data
         else:
             return graph_data_left, graph_data_right
@@ -265,6 +280,7 @@ class RoboCasaDataset(Dataset):
         # --- GOALS ---
         # Language goal is static per demonstration
         item['goal']['lang'] = self.lang_goals[demo_idx]
+        item['goal']['lang_text'] = self.lang_goals_text[demo_idx]
         item['goal']['task_name'] = self.task_name
         
         return item

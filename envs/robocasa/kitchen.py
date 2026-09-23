@@ -17,7 +17,7 @@ import logging
 from networks.vision_encoder.cnn import SimpleImageEncoder
 from networks.vision_encoder.utils import crop_and_resize_to_64, crop_and_resize_to_64_for_fusion
 from utils.create_graphs import create_graph_datapoint
-from utils.generate_graph_dataset_robocasa import OBJECT_NAMES_IMAGES, get_bb_pos, get_clip_label_embeddings
+from utils.generate_graph_dataset_robocasa import OBJECT_NAMES_IMAGES, get_bb_pos, get_clip_label_embeddings, get_random_label_embeddings
 from utils.generate_3d_bb_dataset_robocasa import (
     BB3D_FEATURE_DIM,
     FRAME_MODES,
@@ -34,6 +34,10 @@ from utils.generate_3d_bb_dataset_robocasa import (
 from robosuite.utils.camera_utils import get_camera_extrinsic_matrix, get_camera_intrinsic_matrix, get_real_depth_map
 
 log = logging.getLogger(__name__)
+
+
+class EmptySceneError(RuntimeError):
+    """No unmasked object is visible in either camera and no node has been seen earlier in the episode."""
 
 class RoboCasaKitchenTester():
     def __init__(self,
@@ -117,7 +121,7 @@ class RoboCasaKitchenTester():
                     right_graph[mod] = nx.DiGraph()
 
                 if manager.use_proprioceptive:
-                    prop_obs = self.create_prop_obs(obs_all)
+                    prop_obs = self.create_prop_obs(obs_all, manager)
                     obs['obs_prop'] = prop_obs
                 if manager.use_image:
                     img_obs = self.create_image_obs(obs_all, manager)
@@ -135,7 +139,7 @@ class RoboCasaKitchenTester():
                 
                 while step_counter < env.horizon:
                     batch = {'observation': obs,
-                             'goal': {'lang': lang_goal, 'task_name': task_name},
+                             'goal': {'lang': lang_goal, 'lang_text': lang_goal, 'task_name': task_name},
                              'task_name': task_name,
                              }
 
@@ -151,15 +155,22 @@ class RoboCasaKitchenTester():
                         step_counter += 1
                         pbar.update(1)
 
+                    prev_graph_obs = obs.get('obs_graph')
                     obs = {}
                     if manager.use_proprioceptive:
-                        prop_obs = self.create_prop_obs(obs_all)
+                        prop_obs = self.create_prop_obs(obs_all, manager)
                         obs['obs_prop'] = prop_obs
                     if manager.use_image:
                         img_obs = self.create_image_obs(obs_all, manager)
                         obs['obs_img'] = img_obs
                     if manager.use_graph:
-                        graph_obs = self.create_graph_obs(obs_all, left_graph, right_graph, manager, env)
+                        try:
+                            graph_obs = self.create_graph_obs(obs_all, left_graph, right_graph, manager, env)
+                        except EmptySceneError as e:
+                            if prev_graph_obs is None:
+                                raise
+                            log.warning(f"Empty scene at step {step_counter} ({e}); reusing the previous graph observation")
+                            graph_obs = prev_graph_obs
                         obs['obs_graph'] = graph_obs
                     
                     if env._check_success():
@@ -183,8 +194,15 @@ class RoboCasaKitchenTester():
             env.close()
         return result_dict
     
-    def create_prop_obs(self, obs_all):
-        pass # TODO not yet needed (could be interesting in future)
+    def create_prop_obs(self, obs_all, manager):
+        """Low-dim robot state in the same key order as training (manager.prop_modalities),
+        shaped (1, 1, D) = (batch, obs_window, D) like the other single-step rollout obs."""
+        parts = []
+        for mod in manager.prop_modalities:
+            if mod == 'object':
+                raise NotImplementedError("'object' prop modality is not supported at rollout")
+            parts.append(torch.as_tensor(np.asarray(obs_all[mod]), dtype=torch.float32).reshape(-1))
+        return torch.cat(parts).unsqueeze(0).unsqueeze(0)
     
     def create_image_obs(self, obs_all, manager):
         obs = {}
@@ -209,6 +227,14 @@ class RoboCasaKitchenTester():
 
         for mod in manager.graph_modalities:
             left_object_names, right_object_names, left_objects, right_objects = self.get_data_from_img(obs_all, mod, self.cls_numbers, self.cls_list, env)
+            # An empty view has a (0, 0) placeholder: borrow the feature width of the other view.
+            if left_objects.shape[-1] == 0 and right_objects.shape[-1] > 0:
+                left_objects = torch.empty((0, right_objects.shape[-1]), dtype=right_objects.dtype)
+            elif right_objects.shape[-1] == 0 and left_objects.shape[-1] > 0:
+                right_objects = torch.empty((0, left_objects.shape[-1]), dtype=left_objects.dtype)
+            if (not left_object_names and not right_object_names
+                    and left_graph[mod].number_of_nodes() == 0 and right_graph[mod].number_of_nodes() == 0):
+                raise EmptySceneError(f"no unmasked object visible for '{mod}' and no node seen yet")
             left_data_point[mod] = create_graph_datapoint(left_graph[mod], left_object_names, left_objects)
             right_data_point[mod] = create_graph_datapoint(right_graph[mod], right_object_names, right_objects)
 
@@ -235,6 +261,13 @@ class RoboCasaKitchenTester():
                 graph_obs[mod + '_right'] = graph_data_right[mod]
         return graph_obs
                 
+    @staticmethod
+    def _stack_or_empty(items):
+        # With mask_objects a camera can see no unmasked object at all (helper_function then returns
+        # empty lists). Return an empty (0, 0) placeholder instead of crashing in torch.stack; the
+        # per-episode nx graph still holds every node seen earlier, so the node set is unchanged.
+        return torch.stack(items) if len(items) > 0 else torch.empty((0, 0))
+
     def get_data_from_img(self, obs, mod, cls_numbers: list, cls_list: list, env=None):
 
         left_object_names, left_boxes, left_morph_masks, left_img = self.helper_function(obs, 'agentview_left', cls_numbers, cls_list)
@@ -258,15 +291,18 @@ class RoboCasaKitchenTester():
                 index = OBJECT_NAMES_IMAGES.index(name)
                 one_hot[index] = 1.0
                 objects.append(one_hot)
-            left_objects = torch.stack(objects)
+            left_objects = self._stack_or_empty(objects)
         elif mod == "clip_labels":
             clip_embeddings = get_clip_label_embeddings()
-            left_objects = torch.stack([clip_embeddings[name] for name in left_object_names])
+            left_objects = self._stack_or_empty([clip_embeddings[name] for name in left_object_names])
+        elif mod == "random_labels":
+            random_embeddings = get_random_label_embeddings()
+            left_objects = self._stack_or_empty([random_embeddings[name] for name in left_object_names])
         elif mod == "bb_coordinates":
             objects = []
             for i in range(left_boxes.shape[0]):
                 objects.append(get_bb_pos(left_boxes[i]) / 127)
-            left_objects = torch.stack(objects)
+            left_objects = self._stack_or_empty(objects)
         elif mod == "cropped_image_feature":
             object_img = []
             for i in range(left_morph_masks.shape[0]):
@@ -279,7 +315,7 @@ class RoboCasaKitchenTester():
                     object_img.append(crop_and_resize_to_64_for_fusion(left_img, right_img, left_morph_masks[i], obj_r))
                 else:
                     object_img.append(crop_and_resize_to_64(left_img, left_morph_masks[i]))
-            left_objects = self.cropped_image_feature_encoder(torch.stack(object_img)).squeeze(0)
+            left_objects = self.cropped_image_feature_encoder(torch.stack(object_img)).squeeze(0) if object_img else torch.empty((0, 0))
         elif mod == "bb3d_coordinates":
             # Node list comes straight from world_boxes, not from the (cv2-opened,
             # 2D-pipeline) left_object_names - see the comment above world_boxes.
@@ -297,15 +333,18 @@ class RoboCasaKitchenTester():
                 index = OBJECT_NAMES_IMAGES.index(name)
                 one_hot[index] = 1.0
                 objects.append(one_hot)
-            right_objects = torch.stack(objects)
+            right_objects = self._stack_or_empty(objects)
         elif mod == "clip_labels":
             clip_embeddings = get_clip_label_embeddings()
-            right_objects = torch.stack([clip_embeddings[name] for name in right_object_names])
+            right_objects = self._stack_or_empty([clip_embeddings[name] for name in right_object_names])
+        elif mod == "random_labels":
+            random_embeddings = get_random_label_embeddings()
+            right_objects = self._stack_or_empty([random_embeddings[name] for name in right_object_names])
         elif mod == "bb_coordinates":
             objects = []
             for i in range(right_boxes.shape[0]):
                 objects.append(get_bb_pos(right_boxes[i]) / 127)
-            right_objects = torch.stack(objects)
+            right_objects = self._stack_or_empty(objects)
         elif mod == "cropped_image_feature":
             object_img = []
             for i in range(right_morph_masks.shape[0]):
@@ -318,7 +357,7 @@ class RoboCasaKitchenTester():
                     object_img.append(crop_and_resize_to_64_for_fusion(left_img, right_img, obj_l, right_morph_masks[i]))
                 else:
                     object_img.append(crop_and_resize_to_64(right_img, right_morph_masks[i]))
-            right_objects = self.cropped_image_feature_encoder(torch.stack(object_img)).squeeze(0)
+            right_objects = self.cropped_image_feature_encoder(torch.stack(object_img)).squeeze(0) if object_img else torch.empty((0, 0))
         elif mod == "bb3d_coordinates":
             right_object_names = sorted(world_boxes.keys())
             right_objects = torch.stack([world_boxes[name] for name in right_object_names]) \

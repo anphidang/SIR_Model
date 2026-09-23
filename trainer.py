@@ -33,6 +33,10 @@ class Trainer():
         torch.manual_seed(self.seed)
         torch.backends.cudnn.benchmark = False
         torch.backends.cudnn.deterministic = True
+        # cuDNN is unusable on this machine (CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH on every conv2d);
+        # only the image-embedding baseline needs GPU convolutions, so it opts out via the environment.
+        if os.environ.get("SIR_DISABLE_CUDNN") == "1":
+            torch.backends.cudnn.enabled = False
         torch.use_deterministic_algorithms = True
 
         log.info(f'Used seed: {self.seed}')

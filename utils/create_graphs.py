@@ -10,6 +10,14 @@ def create_graph_datapoint(graph: nx.Graph,
         objects = objects.unsqueeze(0)
     add_nodes_to_graph(graph, object_names, objects)
 
+    # No node at all (only possible for a view that saw nothing and whose graph is still empty):
+    # nx.to_scipy_sparse_array would raise, so return an empty graph with the feature width of `objects`.
+    if graph.number_of_nodes() == 0:
+        return Data(x=torch.empty((0, objects.shape[-1]), dtype=objects.dtype),
+                    edge_index=torch.empty((2, 0), dtype=torch.long),
+                    edge_attr=torch.empty(0),
+                    node_names=[])
+
     # Convert Graph to Data object
     adj = nx.to_scipy_sparse_array(graph).tocoo()
     row = adj.row

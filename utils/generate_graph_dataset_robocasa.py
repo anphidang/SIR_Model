@@ -80,6 +80,22 @@ def get_clip_label_embeddings(device: str = "cpu") -> dict:
         }
     return _clip_label_embeddings
 
+_random_label_embeddings = None
+
+def get_random_label_embeddings(seed: int = 0) -> dict:
+    """Capacity-matched control for clip_labels: one fixed random unit-norm CLIP_LABEL_DIM-d
+    vector per name in OBJECT_NAMES_IMAGES. Same width and L2 norm (1.0) as the normalized CLIP
+    text embeddings, so graph_encoder gets the identical input_dim, but no semantic structure
+    and no relationship to the instruction embedding. Keyed by raw object name like the
+    other label modalities."""
+    global _random_label_embeddings
+    if _random_label_embeddings is None:
+        gen = torch.Generator().manual_seed(seed)
+        emb = torch.randn(len(OBJECT_NAMES_IMAGES), CLIP_LABEL_DIM, generator=gen)
+        emb = emb / emb.norm(dim=-1, keepdim=True)
+        _random_label_embeddings = {name: emb[i] for i, name in enumerate(OBJECT_NAMES_IMAGES)}
+    return _random_label_embeddings
+
 @torch.no_grad()
 def create_graphs_and_save(dataset_path: str,
                            task_name: str,
@@ -159,7 +175,7 @@ def extract_graph_objects(dataset, key, j, graph_modality: str, left_img, right_
 
     if graph_modality == "one_hot_labels":
         object_representation = "bb" # Just a placeholder, because one hot labels do not have extra representation
-    elif graph_modality == "clip_labels":
+    elif graph_modality in ("clip_labels", "random_labels"):
         object_representation = "bb" # same placeholder reasoning as one_hot_labels
     elif graph_modality == "bb_coordinates":
         object_representation = "bb"
@@ -213,6 +229,9 @@ def get_node_features(objects_left,
         elif graph_modality == "clip_labels":
             clip_embeddings = get_clip_label_embeddings()
             feature_vec_left.append(clip_embeddings[object_names_left[i]])
+        elif graph_modality == "random_labels":
+            random_embeddings = get_random_label_embeddings()
+            feature_vec_left.append(random_embeddings[object_names_left[i]])
         elif graph_modality == "bb_coordinates":
             bbox = objects_left[i]
             pos_feature = torch.tensor(get_bb_pos(bbox)) / 127
@@ -243,6 +262,9 @@ def get_node_features(objects_left,
         elif graph_modality == "clip_labels":
             clip_embeddings = get_clip_label_embeddings()
             feature_vec_right.append(clip_embeddings[object_names_right[i]])
+        elif graph_modality == "random_labels":
+            random_embeddings = get_random_label_embeddings()
+            feature_vec_right.append(random_embeddings[object_names_right[i]])
         elif graph_modality == "bb_coordinates":
             bbox = objects_right[i]
             pos_feature = torch.tensor(get_bb_pos(bbox)) / 127
@@ -336,9 +358,19 @@ def is_node_relevant_for_task(node_name, task_name,     lang_goal):
         is_relevant = True
     else:
         if task_name in ["CloseSingleDoor", "OpenSingleDoor", "CloseDoubleDoor", "OpenDoubleDoor"]:
-            obj_door_to_close = lang_goal.split(" ")[-2].lower()
-            if obj_door_to_close in node_name.lower():
+            # 'door_obj' is the fixed, task-agnostic node name for the actual interactive door
+            # panel across every door task instance (OBJECT_NAMES_IMAGES, position 25) -
+            # regardless of which fixture (microwave, cabinet, ...) it belongs to.
+            if node_name == "door_obj":
                 is_relevant = True
+            else:
+                # Fallback: also count the specific fixture body named in the instruction
+                # (e.g. 'Microwave' for "close the microwave door") as relevant.
+                words = (lang_goal or "").split(" ")
+                if len(words) >= 2:
+                    obj_door_to_close = words[-2].lower()
+                    if obj_door_to_close in node_name.lower():
+                        is_relevant = True
 
     return is_relevant
 

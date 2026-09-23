@@ -89,6 +89,7 @@ class RoboCasa_Manager(Base_Manager):
                 use_splitted_modalities=self.use_splitted_modalities,
                 cropped_img_dim=self.cropped_img_dim,
                 cropped_model_name=self.pretrained_img_encoder_name,
+                mask_objects=self.mask_objects,
             )
 
         self.y_bounds = torch.tensor(
@@ -109,22 +110,20 @@ class RoboCasa_Manager(Base_Manager):
             else:
                 crop_str = ""
 
-            # bb3d_coordinates masking lives in the offline bb3d_dataset.hdf5 (generated
-            # separately via generate_3d_bb_dataset_robocasa.py --mask_objects), not in this
-            # cache, so mask_str must not apply there - it would falsely invalidate/collide
-            # bb3d's cache path.
-            if mod != "bb3d_coordinates" and self.mask_objects:
-                mask_str = "_mask_" + "_".join(sorted(self.mask_objects))
-            else:
-                mask_str = ""
-
+            # mask_objects is NOT baked into this cache: create_graphs_and_save can only build
+            # graphs from a from-scratch raw-hdf5 parse (broken for any task using the current
+            # demo_gentex_*.hdf5 robomimic layout - see create_graphs_and_save docstring), and
+            # bb3d's own generator has no mask_objects support in this auto-build path either.
+            # The cache therefore always holds the full/unmasked node set for every modality;
+            # masking is applied post-hoc at load time (dataloader/utils.py combine_graph_modalities
+            # /fuse_graphs, threaded via dataloader.dataset_split_robocasa's mask_objects param).
             if self.task_names[0] == "ALL":
                 task_names = TASK_LIST
             else:
                 task_names = self.task_names
             for task_name in task_names:
-                right_graph = not os.path.isfile(os.path.join(self.data_path, task_name, mod + crop_str + mask_str + "_right_image.pth"))
-                left_graph = not os.path.isfile(os.path.join(self.data_path, task_name, mod + crop_str + mask_str + "_left_image.pth"))
+                right_graph = not os.path.isfile(os.path.join(self.data_path, task_name, mod + crop_str + "_right_image.pth"))
+                left_graph = not os.path.isfile(os.path.join(self.data_path, task_name, mod + crop_str + "_left_image.pth"))
                 if right_graph or left_graph:
                     datasets_to_create.append((task_name, mod))
         
@@ -148,7 +147,6 @@ class RoboCasa_Manager(Base_Manager):
                         task_name=task,
                         graph_modality=mod,
                         encoder_model=self.cropped_image_feature_encoder,
-                        mask_objects=self.mask_objects,
                     )
     
     def test_method(self, method, store_videos, eval_n_times, working_dir, during_training=False, epoch=None):
@@ -199,24 +197,24 @@ class RoboCasa_Manager(Base_Manager):
         return results_all
     
     def calculate_proprioceptive_dim(self, modalities):
+        # Widths verified against the obs shapes in demo_gentex_im128_randcams.hdf5
+        # (gripper_qpos was 4 and joint_pos 3 here before - the dataset has 2 and 7).
+        widths = {
+            'robot0_gripper_qpos': 2,
+            'robot0_joint_pos': 7,
+            'robot0_eef_pos': 3,
+            'robot0_eef_quat': 4,
+            'robot0_base_pos': 3,
+            'robot0_base_quat': 4,
+            'robot0_base_to_eef_pos': 3,
+            'robot0_base_to_eef_quat': 4,
+            'object': 56,
+        }
         dim = 0
         for mod in modalities:
-            if mod == 'robot0_gripper_qpos':
-                dim += 4
-            elif mod == 'robot0_joint_pos':
-                dim += 3
-            elif mod == 'robot0_eef_pos':
-                dim += 3
-            elif mod == 'robot0_eef_quat':
-                dim += 4
-            elif mod == 'robot0_base_pos':
-                dim += 3
-            elif mod == 'robot0_base_quat':
-                dim += 4
-            elif mod == 'object':
-                dim += 52
-            else:
+            if mod not in widths:
                 raise ValueError(f'Unknown proprioceptive modality: {mod}')
+            dim += widths[mod]
         return dim
     
     def calculate_graph_dim(self):
@@ -247,6 +245,8 @@ class RoboCasa_Manager(Base_Manager):
             if "one_hot_labels" in mod:
                 dim[mod] += len(OBJECT_NAMES_IMAGES)
             if "clip_labels" in mod:
+                dim[mod] += CLIP_LABEL_DIM
+            if "random_labels" in mod:
                 dim[mod] += CLIP_LABEL_DIM
             if "bb_coordinates" in mod:
                 dim[mod] += 10 * factor

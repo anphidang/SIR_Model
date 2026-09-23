@@ -59,6 +59,13 @@ class Diffusion(Base_Method):
             lang_goal_tokenized = clip.tokenize(lang_goal).to(self.device)
             lang_goal = self.language_encoder.encode_text(lang_goal_tokenized).to(torch.float32)
         goal['lang'] = lang_goal.to(self.device)
+
+        # Raw instruction text per sample, kept separately from the CLIP-encoded 'lang' above -
+        # needed by is_node_relevant_for_task to identify the actual per-episode target object
+        # for door tasks (RELEVENT_NODES alone doesn't name it).
+        lang_goals_text = batch['goal'].get('lang_text')
+        if isinstance(lang_goals_text, str):
+            lang_goals_text = [lang_goals_text]
         #change by me
         if 'obs_graph' in batch['observation'] and 'task_name' in batch:
             for key in batch['observation']['obs_graph']:
@@ -70,15 +77,19 @@ class Diffusion(Base_Method):
                 batch['observation']['obs_graph'][key].lang_goal = goal['lang']
         
         for key in batch['observation']:
+            if key == "obs_prop":
+                # obs_prop is a bare (b, w, d) tensor, not a dict of tensors like obs_img /
+                # obs_graph - the per-key loops below would iterate over its rows and index the
+                # tensor with them.
+                state[key] = batch["observation"][key].to(self.device).float()
+                continue
             for k in batch["observation"][key]:
                 if key == "obs_graph":
                     batch["observation"][key][k] = batch["observation"][key][k].to(self.device)
                 else:
                     batch["observation"][key][k] = batch["observation"][key][k].to(self.device).float()
                     batch["observation"][key][k] = einops.rearrange(batch["observation"][key][k], "b w ... -> (b w) ...")
-            if key == "obs_prop":
-                state[key] = batch["observation"][key].to(self.device).float()
-            elif key == "obs_img":
+            if key == "obs_img":
                 state[key] = self.vision_encoder(batch["observation"][key])
             elif key == "obs_graph":
                 task_names = batch['goal'].get('task_name')
@@ -88,6 +99,7 @@ class Diffusion(Base_Method):
                     batch["observation"][key],
                     lang_emb=goal['lang'],
                     task_names=task_names,
+                    lang_goals=lang_goals_text,
                 )
             else:
                 raise NotImplementedError(f"Modality {key} not implemented in diffusion method.")
@@ -126,6 +138,8 @@ class Diffusion(Base_Method):
         ge = getattr(self, 'graph_encoder', None)
         if ge is not None and getattr(ge, 'selection_accuracy', None) is not None:
             loss_dict['selection_accuracy'] = ge.selection_accuracy
+        if ge is not None and getattr(ge, 'target_selection_accuracy', None) is not None:
+            loss_dict['target_selection_accuracy'] = ge.target_selection_accuracy
         return loss_dict
     
     def compute_validation_loss(self, state, action, goal):

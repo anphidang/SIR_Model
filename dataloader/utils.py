@@ -3,9 +3,9 @@ import torch
 from utils.generate_3d_bb_dataset_robocasa import BB3D_FEATURE_DIM
 from utils.generate_graph_dataset_robocasa import CLIP_LABEL_DIM
 
-GRAPH_MODALITY_LIST = ["one_hot_labels", "clip_labels", "bb_coordinates", "cropped_image_feature", "bb3d_coordinates"]
+GRAPH_MODALITY_LIST = ["one_hot_labels", "clip_labels", "random_labels", "bb_coordinates", "cropped_image_feature", "bb3d_coordinates"]
 
-def combine_graph_modalities(graph_data, graph_mod, idx=None, j=None):
+def combine_graph_modalities(graph_data, graph_mod, idx=None, j=None, mask_objects=None):
     if idx is None and j is None:
         graphs = [graph_data[mod] for mod in graph_mod]
     else:
@@ -17,6 +17,8 @@ def combine_graph_modalities(graph_data, graph_mod, idx=None, j=None):
     # modality's nodes onto the union of node names (zero-padding missing ones) before
     # concatenating features, instead of assuming identical node order/count across modalities.
     all_names = sorted(set().union(*(g.node_names for g in graphs)))
+    if mask_objects:
+        all_names = [n for n in all_names if n not in mask_objects]
     name_to_idx = {name: i for i, name in enumerate(all_names)}
     num_nodes = len(all_names)
 
@@ -24,7 +26,8 @@ def combine_graph_modalities(graph_data, graph_mod, idx=None, j=None):
     for g in graphs:
         block = torch.zeros((num_nodes, g.x.shape[1]), device=g.x.device, dtype=g.x.dtype)
         for src_i, name in enumerate(g.node_names):
-            block[name_to_idx[name]] = g.x[src_i]
+            if name in name_to_idx:
+                block[name_to_idx[name]] = g.x[src_i]
         feat_blocks.append(block)
 
     fused_x = torch.cat(feat_blocks, dim=-1)
@@ -51,39 +54,43 @@ def combine_graph_modalities(graph_data, graph_mod, idx=None, j=None):
 
     return base_graph
 
-def fuse_graphs(graph_data_left, graph_data_right, mod, step_idx=None, is_cropped_fusion=False):
+def fuse_graphs(graph_data_left, graph_data_right, mod, step_idx=None, is_cropped_fusion=False, mask_objects=None):
     if step_idx is None:
         left_graph = graph_data_left[mod]
         right_graph = graph_data_right[mod]
     else:
         left_graph = graph_data_left[mod][step_idx]
         right_graph = graph_data_right[mod][step_idx]
-    
+
     left_names = left_graph.node_names
     right_names = right_graph.node_names
     all_names = sorted(list(set(left_names) | set(right_names)))
-    
+    if mask_objects:
+        all_names = [n for n in all_names if n not in mask_objects]
+
     name_to_idx = {name: i for i, name in enumerate(all_names)}
     num_nodes = len(all_names)
-    
+
     feat_dim_l = left_graph.x.shape[1]
     feat_dim_r = right_graph.x.shape[1]
-    
+
     # Create zero-filled tensors for the fused graph
     # Shape: [Total_Unique_Nodes, Left_Dim]
     x_l_mapped = torch.zeros((num_nodes, feat_dim_l), device=left_graph.x.device, dtype=left_graph.x.dtype)
     # Shape: [Total_Unique_Nodes, Right_Dim]
     x_r_mapped = torch.zeros((num_nodes, feat_dim_r), device=right_graph.x.device, dtype=right_graph.x.dtype)
-    
+
     # Map Left Features
     for src_i, name in enumerate(left_names):
-        target_i = name_to_idx[name]
-        x_l_mapped[target_i] = left_graph.x[src_i]
-        
+        target_i = name_to_idx.get(name)
+        if target_i is not None:
+            x_l_mapped[target_i] = left_graph.x[src_i]
+
     # Map Right Features
     for src_i, name in enumerate(right_names):
-        target_i = name_to_idx[name]
-        x_r_mapped[target_i] = right_graph.x[src_i]
+        target_i = name_to_idx.get(name)
+        if target_i is not None:
+            x_r_mapped[target_i] = right_graph.x[src_i]
 
     fused_x, bb_index = handle_fusing(x_l_mapped, x_r_mapped, mod, is_cropped_fusion)
 
@@ -139,6 +146,9 @@ def handle_fusing(left, right, mod, cropped_fusion):
     if "clip_labels" in mod:
         clip_index = mod.find("clip_labels")
         active_mods.append((clip_index, 'clip', CLIP_LABEL_DIM))
+    if "random_labels" in mod:
+        rand_index = mod.find("random_labels")
+        active_mods.append((rand_index, 'rand', CLIP_LABEL_DIM))
     if "bb_coordinates" in mod:
         bb_index = mod.find("bb_coordinates")
         bb_length = 10
