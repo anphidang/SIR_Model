@@ -25,13 +25,16 @@ The fork is based on upstream commit `5ea851e`; upstream `19d1d57` and `c0e8a2e`
 
 | Change | Files | Purpose |
 |:---|:---|:---|
-| `Multi_XAI_GNN` wrapper | `networks/graph_encoder/gnn.py` | The released `xai_gnn.yaml` points to a class `Multi_XAI_GNN` that does not exist upstream, so the sparsified configuration cannot be trained there. The wrapper runs the released `Sparsification_Module` per modality and passes the retained sub-graph to the GNN. Sparsifier hyperparameters are unchanged. |
+| `Multi_XAI_GNN` wrapper | `networks/graph_encoder/gnn.py` | The released `xai_gnn.yaml` points to a class `Multi_XAI_GNN` that does not exist upstream, so the sparsified configuration cannot be trained there. The wrapper runs the released `Sparsification_Module` per modality and passes the retained sub-graph to the GNN. The module itself only got small fixes; its hyperparameters are unchanged. |
 | Score-weighted readout, `selection_accuracy` logging | `networks/graph_encoder/gnn.py` | Pooling weighted by node scores; logging-only diagnostic of which nodes are retained |
 | Unit tests for the sparsifier | `test_xai_gnn.py` | CPU-only checks on synthetic graphs (shapes, *k* nodes kept, gradient flow) |
 | 3D oriented bounding boxes (`bb3d_coordinates`) | `utils/generate_3d_bb_dataset_robocasa.py`, `utils/generate_3d_bb_graph_dataset_robocasa.py`, `dataloader/`, `manager/` | Node geometry as a 12-D oriented 3D box relative to the gripper (`full` or `translation_only` frame) |
 | CLIP label embeddings (`clip_labels`) | `utils/generate_graph_dataset_robocasa.py` | Node labels as L2-normalised CLIP ViT-B/32 text embeddings instead of one-hot vectors |
-| Node masking (`mask_objects`) | `dataloader/utils.py`, `manager/robocasa_manager.py`, `envs/robocasa/kitchen.py` | Remove given object classes from every graph, at training and rollout time |
+| Node masking (`mask_objects`) | `dataloader/utils.py`, `manager/robocasa_manager.py`, `envs/robocasa/kitchen.py` | Remove given object classes from every graph, at training and rollout time. The mask is applied at load time to the full graphs and is not part of the cache key |
 | Data-pipeline and RoboCasa fixes | `dataloader/`, `manager/`, `envs/robocasa/kitchen.py` | Fixes needed to run the pipeline end to end |
+| Sub-graph inspection | `utils/inspect_subgraphs.py` | Runs a trained sparsifier over all demonstration frames, records the retained nodes and the exact per-frame chance level |
+| Image tensors | `utils/make_img_tensors.py` | Rebuilds the per-demo image tensors the data loader expects for the image-only baseline |
+| Run-time accounting | `utils/run_time.py` | Wall-clock run durations from `main.log`, excluding suspend periods |
 | Run scripts | `run_all.sh`, `configs/mask_sweep.yaml` | SIR / fully connected / image runs on TurnOffSinkFaucet; masking sweep |
 
 Note that `configs/method/diffusion.yaml` now uses the sparsified encoder (`xai_gnn`) by default. Use
@@ -110,20 +113,21 @@ evaluation with 100 rollouts (`trainer.eval_n_times=20` × `manager.times_repeat
 COMMON="manager.task_names=[CloseSingleDoor] trainer.seed=42 trainer.epochs=50 trainer.test_bool=True trainer.eval_n_times=20"
 ```
 
-| Report ID | Description | Overrides (in addition to `$COMMON`) |
+| Name in the report | W&B run name | Overrides (in addition to `$COMMON`) |
 |:---|:---|:---|
-| R_fc_graph | Fully connected graph | `method/graph_encoder=gnn manager.graph_modalities=[bb_coordinates,cropped_image_feature]` |
-| R_sir_seed42 / E1b | SIR | `method/graph_encoder=xai_gnn manager.graph_modalities=[bb_coordinates,cropped_image_feature]` |
-| R_sir_seed43 | SIR, second seed | as above with `trainer.seed=43` |
-| E1a | Robot and fixture nodes masked | SIR + `manager.mask_objects=[PandaMobile,PandaGripper,Wall,Counter,Floor]` |
-| E1c | Fixture nodes masked | SIR + `manager.mask_objects=[Wall,Counter,Floor]` |
-| E1d | E1a + proprioception | E1a + `manager.prop_modalities=[robot0_base_to_eef_pos,robot0_base_to_eef_quat,robot0_gripper_qpos]` |
-| E1e | SIR + proprioception | SIR + the same `manager.prop_modalities` |
-| E2a | CLIP labels | SIR with `manager.graph_modalities=[bb_coordinates,cropped_image_feature,clip_labels]` |
-| E2b | One-hot labels | SIR with `manager.graph_modalities=[bb_coordinates,cropped_image_feature,one_hot_labels]` |
-| E2fc | CLIP labels, fully connected | E2a with `method/graph_encoder=gnn` |
-| E3a-full / E3a-trans | 3D boxes | `manager.graph_modalities=[bb3d_coordinates,cropped_image_feature] manager.bb3d_frame_mode=full` (or `translation_only`) + `method.graph_encoder.sparsification_layer.sampling_strategy=topk` |
-| E3b | 2D control for E3 | as E3 with `bb_coordinates` instead of `bb3d_coordinates` |
+| FC (no label) | R_fc_graph | `method/graph_encoder=gnn manager.graph_modalities=[bb_coordinates,cropped_image_feature]` |
+| SIR baseline | E1b | `method/graph_encoder=xai_gnn manager.graph_modalities=[bb_coordinates,cropped_image_feature]` |
+| SIR, seed 43 | R_sir_seed43 | as SIR baseline with `trainer.seed=43` |
+| SIR masked | E1a | SIR baseline + `manager.mask_objects=[PandaMobile,PandaGripper,Wall,Counter,Floor]` |
+| SIR fixtures-masked | E1c | SIR baseline + `manager.mask_objects=[Wall,Counter,Floor]` |
+| SIR + proprio | E1e | SIR baseline + `manager.prop_modalities=[robot0_base_to_eef_pos,robot0_base_to_eef_quat,robot0_gripper_qpos]` |
+| SIR masked + proprio | E1d | SIR masked + the same `manager.prop_modalities` |
+| SIR one-hot | E2b | SIR baseline with `manager.graph_modalities=[bb_coordinates,cropped_image_feature,one_hot_labels]` |
+| SIR-CLIP | E2a | SIR baseline with `manager.graph_modalities=[bb_coordinates,cropped_image_feature,clip_labels]` |
+| FC-CLIP | E2fc | SIR-CLIP with `method/graph_encoder=gnn` |
+| TopK-2D | E3b | SIR baseline + `method.graph_encoder.sparsification_layer.sampling_strategy=topk` |
+| TopK-3D (SE(3)) | E3a-full | TopK-2D with `manager.graph_modalities=[bb3d_coordinates,cropped_image_feature] manager.bb3d_frame_mode=full` |
+| TopK-3D (translation) | E3a-trans | as TopK-3D (SE(3)) with `manager.bb3d_frame_mode=translation_only` |
 
 Example:
 
